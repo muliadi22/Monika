@@ -1,6 +1,18 @@
 <?php 
 // ajukan_permohonan.php
 require_once 'config/database.php';
+
+// ==========================================================
+// AUTO PATCH DATABASE: MEMBUAT KOLOM OTOMATIS JIKA BELUM ADA
+// ==========================================================
+try {
+    $cek_link = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'link_dokumentasi'");
+    if ($cek_link && mysqli_num_rows($cek_link) === 0) {
+        @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN link_dokumentasi TEXT NULL AFTER jumlah_permintaan");
+    }
+} catch (Throwable $e) {}
+// ==========================================================
+
 include 'includes/header.php'; 
 
 // DAFTAR KLINIK BERSIH: Bersumber 100% dari Database (Master Klinik & Riwayat)
@@ -64,7 +76,6 @@ sort($daftar_klinik);
 
 // ==========================================================
 // DAFTAR KABUPATEN / KOTA (master_kabupaten + riwayat ketikan pemohon)
-// Tabel dibuat & diisi otomatis bila belum ada (lihat juga database_kabupaten.sql)
 // ==========================================================
 $kabupaten_bawaan = ['Balangan', 'Banjar', 'Barito Kuala', 'Hulu Sungai Selatan', 'Hulu Sungai Tengah', 'Hulu Sungai Utara',
                      'Kotabaru', 'Tabalong', 'Tanah Bumbu', 'Tanah Laut', 'Tapin', 'Banjarmasin', 'Banjarbaru'];
@@ -84,7 +95,7 @@ try {
     while ($rk && ($r = mysqli_fetch_assoc($rk))) { $daftar_kabupaten[] = $r['nama_kabupaten']; }
 } catch (Throwable $ex) {}
 if (!$daftar_kabupaten) $daftar_kabupaten = $kabupaten_bawaan;
-try {   // riwayat yang diketik manual pemohon sebelumnya (kolom bisa saja belum ada)
+try {
     $rr = mysqli_query($conn, "SELECT DISTINCT nama_kabupaten FROM permohonan WHERE nama_kabupaten IS NOT NULL AND nama_kabupaten != ''");
     while ($rr && ($r = mysqli_fetch_assoc($rr))) { $daftar_kabupaten[] = $r['nama_kabupaten']; }
 } catch (Throwable $ex) {}
@@ -305,7 +316,7 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                         <div class="err-msg">Nama klinik wajib diisi.</div>
                     </div>
 
-                    <!-- Nama kabupaten/kota + dropdown pencarian (sama seperti nama klinik) -->
+                    <!-- Nama kabupaten/kota + dropdown pencarian -->
                     <div class="field-wrap mb-3 position-relative">
                         <div class="form-floating">
                             <input type="text" class="form-control" id="nm_kabupaten" name="nama_kabupaten" placeholder="Nama Kabupaten" autocomplete="off" required role="combobox" aria-expanded="false" aria-controls="kabupatenDropdown">
@@ -336,7 +347,7 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                 <!-- ============ STEP 2 ============ -->
                 <section class="panel" data-title="Data EICV & Permintaan">
                     <div class="panel-title"><i class="bi bi-clipboard2-pulse text-primary me-2"></i>Data EICV &amp; Permintaan</div>
-                    <div class="panel-sub">Stok, pemakaian, dan jumlah vaksin yang diminta.</div>
+                    <div class="panel-sub">Stok, pemakaian, jumlah vaksin, dan dokumentasi penyuntikan.</div>
 
                     <div class="field-wrap mb-3">
                         <div class="form-floating">
@@ -359,6 +370,15 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                         </div>
                         <div class="err-msg">Isi dengan angka 0 atau lebih.</div>
                     </div>
+                    <!-- ============ Link Dokumentasi Penyuntikan ============ -->
+                    <div class="field-wrap mb-3">
+                        <div class="form-floating">
+                            <input type="url" class="form-control" id="link_dokumentasi" name="link_dokumentasi" placeholder="https://" required>
+                            <label for="link_dokumentasi">Link Dokumentasi Penyuntikan (Google Drive)</label>
+                        </div>
+                        <div class="err-msg">Link dokumentasi wajib diisi.</div>
+                    </div>
+                    <!-- ======================================================== -->
                 </section>
 
                 <!-- ============ STEP 3 ============ -->
@@ -403,7 +423,6 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                                 <label for="merek">Merek Vaksin</label>
                                 <i class="bi bi-chevron-down position-absolute" id="merekIcon" style="right: 18px; top: 20px; font-size: 1.1rem; color: var(--muted); pointer-events: none; transition: transform .3s;"></i>
                             </div>
-                            
                             <ul class="klinik-dropdown shadow-lg" id="merekDropdown" style="max-height: 190px;">
                                 <?php
                                 $query_merek_vaksin = @mysqli_query($conn, "SELECT nama_merek FROM master_merek_vaksin ORDER BY nama_merek ASC");
@@ -418,20 +437,18 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                             <div class="err-msg">Merek vaksin wajib diisi.</div>
                         </div>
                         
-                        <!-- ============ Custom Dropdown: Jenis Vaksin (DIPINDAH KE SINI) ============ -->
+                        <!-- ============ Custom Dropdown: Jenis Vaksin ============ -->
                         <div class="col-md-6 field-wrap position-relative">
                             <div class="form-floating">
                                 <input type="text" class="form-control pe-5" id="jenis" name="jenis_vaksin" placeholder="Jenis Vaksin" autocomplete="off" required readonly style="cursor: pointer; background-color: var(--field);">
                                 <label for="jenis">Jenis Vaksin</label>
                                 <i class="bi bi-chevron-down position-absolute" id="jenisIcon" style="right: 18px; top: 20px; font-size: 1.1rem; color: var(--muted); pointer-events: none; transition: transform .3s;"></i>
                             </div>
-                            
                             <ul class="klinik-dropdown shadow-lg" id="jenisDropdown" style="max-height: 190px;">
                                 <?php
                                 $query_jenis_vaksin = @mysqli_query($conn, "SELECT nama_jenis FROM master_jenis_vaksin ORDER BY nama_jenis ASC");
                                 if ($query_jenis_vaksin) {
                                     while ($rjv = mysqli_fetch_assoc($query_jenis_vaksin)) {
-                                        // Mengubah teks langsung menjadi KAPITAL
                                         $val_jenis = strtoupper(htmlspecialchars($rjv['nama_jenis']));
                                         echo '<li data-val="' . $val_jenis . '">' . $val_jenis . '</li>';
                                     }
@@ -440,17 +457,15 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                             </ul>
                             <div class="err-msg">Jenis vaksin wajib diisi.</div>
                         </div>
-                        <!-- =========================================================================== -->
 
                         <div class="col-md-6 field-wrap">
                             <div class="form-floating">
                                 <input type="date" class="form-control" id="exp_date" name="exp_date" placeholder=" " required>
                                 <label for="exp_date">Exp Date</label>
                             </div>
-                            <div class="err-msg">Exp Date Vaksin MM</div>
+                            <div class="err-msg">Exp Date Vaksin wajib diisi.</div>
                         </div>
 
-                        <!-- ============ Batch Vaksin (DIPINDAH KE SINI) ============ -->
                         <div class="col-md-6 field-wrap">
                             <div class="form-floating">
                                 <input type="text" class="form-control" id="batch" name="batch_vaksin" placeholder="Batch" required>
@@ -458,7 +473,6 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
                             </div>
                             <div class="err-msg">Batch vaksin wajib diisi.</div>
                         </div>
-                        <!-- ========================================================= -->
 
                         <div class="col-md-6 field-wrap">
                             <div class="form-floating">
@@ -558,9 +572,32 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
     $('#clearDraft').addEventListener('click', () => {
         try { localStorage.removeItem(DRAFT_KEY); } catch (e) {}
         form.reset(); $('#tgl_mohon').value = todayStr; clearFile();
-        $$('.form-control').forEach(f => f.classList.remove('valid', 'invalid')); goTo(0); toast('Draf dihapus'); });      function validateField(f) { const wrap = f.closest('.field-wrap'); let ok = f.checkValidity() && (f.type === 'number' ? f.value !== '' && +f.value >= 0 : f.value.trim() !== ''); f.classList.toggle('invalid', !ok); f.classList.toggle('valid', ok); if (wrap) wrap.classList.toggle('has-error', !ok); return ok; } function validateStep(i) { let first = null; $$
-('input[required]', panels[i]).forEach(f => { if (!validateField(f) && !first) first = f; });
-        if (first) { first.focus(); toast('Mohon lengkapi isian yang ditandai merah'); return false; }
+        $$('.form-control').forEach(f => f.classList.remove('valid', 'invalid')); goTo(0); toast('Draf dihapus'); });      
+        
+    function validateField(f) { 
+        const wrap = f.closest('.field-wrap'); 
+        let ok = f.checkValidity(); // Gunakan validasi bawaan HTML5 dulu (required, type, dll)
+        
+        if (ok) {
+            // Validasi tambahan
+            if (f.type === 'number') {
+                ok = f.value !== '' && +f.value >= 0;
+            } else if (f.type === 'url') {
+                 // Validasi URL (harus diawali http:// atau https://)
+                 ok = /^https?:\/\//i.test(f.value.trim());
+            } else {
+                ok = f.value.trim() !== '';
+            }
+        }
+
+        f.classList.toggle('invalid', !ok); 
+        f.classList.toggle('valid', ok); 
+        if (wrap) wrap.classList.toggle('has-error', !ok); 
+        return ok; 
+    } 
+
+    function validateStep(i) { let first = null; $$('input[required]', panels[i]).forEach(f => { if (!validateField(f) && !first) first = f; });
+        if (first) { first.focus(); toast('Mohon lengkapi isian yang ditandai merah (URL wajib pakai http/https)'); return false; }
         return true;
     }
 
@@ -581,17 +618,25 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
 
     const labels = {
         tanggal_permohonan: 'Tanggal Permohonan', nama_pemohon: 'Nama Pemohon', nama_klinik: 'Nama Klinik', nama_kabupaten: 'Kabupaten / Kota', no_izin_penerbitan: 'No Izin', masa_berlaku_izin: 'Masa Berlaku Izin',
-        jumlah_stock_akhir_eicv: 'Stock Akhir EICV', jumlah_pemakaian_eicv: 'Pemakaian EICV', jumlah_permintaan: 'Permintaan Vaksin',
+        jumlah_stock_akhir_eicv: 'Stock Akhir EICV', jumlah_pemakaian_eicv: 'Pemakaian EICV', jumlah_permintaan: 'Permintaan Vaksin', link_dokumentasi: 'Link Dokumentasi',
         tanggal_faktur: 'Tanggal Faktur', nama_distributor: 'Distributor', no_invoice: 'No Faktur', jumlah_pembelian: 'Jumlah Pembelian', merek_vaksin: 'Merek Vaksin',
         batch_vaksin: 'Batch', exp_date: 'Exp Date', jenis_vaksin: 'Jenis Vaksin', jumlah_vaksin_mm: 'Vaksin MM', jumlah_vaksin_polio: 'Vaksin Polio'
     };
     const esc = s => s.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const fmtVal = f => f.type === 'date' && f.value ? new Date(f.value + 'T00:00:00').toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' }) : f.value;
+    
     function buildReview() {
         const titles = ['Pemohon & Klinik', 'EICV & Permintaan', 'Faktur & Vaksin'];
         $('#reviewBox').innerHTML = titles.map((t, k) =>
             `<div class="review-group"><h6>${t}<button type="button" data-edit="${k}"><i class="bi bi-pencil"></i> Ubah</button></h6>` +
-            $$('input[name]', panels[k]).map(f => `<div class="review-row"><span>${labels[f.name] || f.name}</span><span>${esc(fmtVal(f) || '-')}</span></div>`).join('') + '</div>'
+            $$('input[name]', panels[k]).map(f => {
+                let val = fmtVal(f) || '-';
+                // Jika field adalah link dokumentasi, tampilkan sebagai link yang bisa diklik
+                if (f.name === 'link_dokumentasi' && val !== '-') {
+                     return `<div class="review-row"><span>${labels[f.name] || f.name}</span><span><a href="${esc(val)}" target="_blank" class="text-primary" style="text-decoration: underline; word-break: break-all;">${esc(val)}</a></span></div>`;
+                }
+                return `<div class="review-row"><span>${labels[f.name] || f.name}</span><span>${esc(val)}</span></div>`;
+            }).join('') + '</div>'
         ).join('');
         $$('[data-edit]',$('#reviewBox')).forEach(b => b.addEventListener('click', () => goTo(+b.dataset.edit, true)));
     }
@@ -633,7 +678,7 @@ body { background: var(--bg) !important; color: var(--text); transition: backgro
     dd.addEventListener('mousedown', e => { const li = e.target.closest('li[data-i]'); if (li) { e.preventDefault(); pick(+li.dataset.i); } });
 
 
-    /* === LOGIKA DROPDOWN KABUPATEN / KOTA (sama seperti klinik) === */
+    /* === LOGIKA DROPDOWN KABUPATEN / KOTA === */
     const daftarKab = <?php echo json_encode($daftar_kabupaten); ?>;
     const kInp = $('#nm_kabupaten'), kDD = $('#kabupatenDropdown'), kCnt = $('#kabupatenCount');
     let kIdx = -1, kShown = [];

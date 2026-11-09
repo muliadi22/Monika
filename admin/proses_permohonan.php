@@ -3,10 +3,54 @@
 session_start();
 require_once '../config/database.php';
 
+// ==========================================================
+// AUTO PATCH DATABASE: MEMBUAT KOLOM OTOMATIS JIKA BELUM ADA
+// ==========================================================
+try {
+    // 1. Cek Kolom link_dokumentasi
+    $ck_link = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'link_dokumentasi'");
+    if ($ck_link && mysqli_num_rows($ck_link) === 0) {
+        @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN link_dokumentasi TEXT NULL AFTER jumlah_permintaan");
+    }
+
+    // 2. Cek Kolom nama_kabupaten
+    $ck_kab = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'nama_kabupaten'");
+    if ($ck_kab && mysqli_num_rows($ck_kab) === 0) {
+        @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN nama_kabupaten VARCHAR(100) NULL AFTER nama_klinik");
+    }
+
+    // 3. Cek Status Ditolak
+    if (empty($_SESSION['kolom_tolak_ok'])) {
+        $c1 = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'alasan_ditolak'");
+        if ($c1 && mysqli_num_rows($c1) === 0) {
+            @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN alasan_ditolak TEXT NULL");
+        }
+        
+        $c2 = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'status_permohonan'");
+        $k2 = $c2 ? mysqli_fetch_assoc($c2) : null;
+        if ($k2 && stripos($k2['Type'], 'enum(') === 0 && stripos($k2['Type'], "'Ditolak'") === false) {
+            $tipe_baru = substr($k2['Type'], 0, -1) . ",'Ditolak')";
+            $def = ($k2['Default'] !== null && $k2['Default'] !== '') ? " DEFAULT '" . mysqli_real_escape_string($conn, $k2['Default']) . "'" : '';
+            $nul = ($k2['Null'] === 'YES') ? ' NULL' : ' NOT NULL';
+            @mysqli_query($conn, "ALTER TABLE permohonan MODIFY status_permohonan $tipe_baru$nul$def");
+        }
+        $_SESSION['kolom_tolak_ok'] = true;
+    }
+} catch (Throwable $ex) {}
+// ==========================================================
+
+
 if(!isset($_SESSION['admin_logged_in'])) { header("Location: login.php"); exit(); }
 
 $me = session_id();
-$nama_admin_sekarang = $_SESSION['nama_lengkap'] ?? 'Admin';
+
+// BACA NAMA PETUGAS DARI COOKIE AGAR SINKRON DENGAN DASHBOARD
+$nama_akun_asli = $_SESSION['nama_lengkap'] ?? 'Admin';
+$nama_petugas_cookie = isset($_COOKIE['eicv_petugas']) ? trim(preg_replace('/\s+/u', ' ', (string)$_COOKIE['eicv_petugas'])) : '';
+$nama_admin_sekarang = ($nama_petugas_cookie !== '') ? mb_substr($nama_petugas_cookie, 0, 40) : $nama_akun_asli;
+// Catat nama petugas untuk riwayat aktivitas (dibaca trigger database pada koneksi yang sama)
+@mysqli_query($conn, "SET @eicv_aktor = '" . mysqli_real_escape_string($conn, $nama_admin_sekarang) . "'");
+
 $id_permohonan = isset($_GET['id']) ? intval($_GET['id']) : 0;
 
 // ==========================================
@@ -133,24 +177,6 @@ function appendLampiranToPdf($pdf, $filePath, $has_fpdi) {
     }
 }
 
-// Siapkan basis data untuk status "Ditolak": kolom alasan_ditolak + nilai "Ditolak" pada kolom status (bila berupa ENUM)
-if (empty($_SESSION['kolom_tolak_ok'])) {
-    try {
-        $ck = mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'nama_kabupaten'");
-        if ($ck && $ck->num_rows === 0) mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN nama_kabupaten VARCHAR(100) NULL AFTER nama_klinik");
-        $c1 = mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'alasan_ditolak'");
-        if ($c1 && $c1->num_rows === 0) mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN alasan_ditolak TEXT NULL");
-        $c2 = mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'status_permohonan'");
-        $k2 = $c2 ? mysqli_fetch_assoc($c2) : null;
-        if ($k2 && stripos($k2['Type'], 'enum(') === 0 && stripos($k2['Type'], "'Ditolak'") === false) {
-            $tipe_baru = substr($k2['Type'], 0, -1) . ",'Ditolak')";
-            $def = ($k2['Default'] !== null && $k2['Default'] !== '') ? " DEFAULT '" . mysqli_real_escape_string($conn, $k2['Default']) . "'" : '';
-            $nul = ($k2['Null'] === 'YES') ? ' NULL' : ' NOT NULL';
-            mysqli_query($conn, "ALTER TABLE permohonan MODIFY status_permohonan $tipe_baru$nul$def");
-        }
-        $_SESSION['kolom_tolak_ok'] = true;
-    } catch (Throwable $ex) {}
-}
 
 $query = "SELECT * FROM permohonan WHERE id_permohonan = $id_permohonan";
 $result = mysqli_query($conn, $query);
@@ -179,6 +205,7 @@ if (!empty($cek_ses_lock) && $cek_ses_lock !== $me) {
 if (!$is_locked_by_other && !isset($_POST['update_proses']) && !isset($_POST['tolak_permohonan'])) {
     $waktu_sql = date('Y-m-d H:i:s');
     $safe_nama = mysqli_real_escape_string($conn, $nama_admin_sekarang);
+    // SAAT ADMIN MASUK, NAMA PETUGAS YANG BENAR DIREKAM KE DATABASE
     mysqli_query($conn, "UPDATE permohonan SET sedang_diproses_oleh = '$safe_nama', session_lock = '$me', waktu_lock = '$waktu_sql' WHERE id_permohonan = $id_permohonan");
 }
 
@@ -572,6 +599,23 @@ if(isset($_POST['update_proses'])) {
                                 <div class="data-label" style="color: #10b981;">Jumlah Permintaan</div><div class="data-value" style="color: #10b981; font-size: 1.15rem;"><?php echo $data['jumlah_permintaan']; ?></div>
                             </div>
                         </div>
+                        
+                        <!-- ============ Tampilan Link Dokumentasi ============ -->
+                        <div class="row mt-2">
+                            <div class="col-12">
+                                <div class="data-label">Link Dokumentasi Penyuntikan</div>
+                                <div class="data-value">
+                                    <?php if (!empty($data['link_dokumentasi'])): ?>
+                                        <a href="<?php echo htmlspecialchars($data['link_dokumentasi']); ?>" target="_blank" class="btn btn-sm btn-outline-primary rounded-pill mt-1" style="font-weight: 600; padding: 4px 14px;">
+                                            <i class="bi bi-box-arrow-up-right me-1"></i> Buka Link Dokumentasi
+                                        </a>
+                                    <?php else: ?>
+                                        <span class="text-muted fst-italic fs-6">Tidak ada link dilampirkan</span>
+                                    <?php endif; ?>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- =================================================== -->
                     </div>
 
                     <div class="detail-group">
@@ -942,7 +986,7 @@ if(isset($_POST['update_proses'])) {
     document.addEventListener('DOMContentLoaded', function() {
         Swal.fire({
             title: 'Peringatan: Data Sedang Diisi',
-            html: 'Admin <b><?php echo e($admin_pembawa_kunci); ?></b> sedang memproses data ini secara aktif.<br><br>Anda masuk dalam <b>Mode Pantau</b> (tombol simpan disembunyikan) untuk mencegah tabrakan data. Mohon tunggu, layar Anda akan dimuat ulang otomatis begitu admin tersebut selesai.',
+            html: 'Admin <b><?php echo addslashes(e($admin_pembawa_kunci)); ?></b> sedang memproses data ini secara aktif.<br><br>Anda masuk dalam <b>Mode Pantau</b> (tombol simpan disembunyikan) untuk mencegah tabrakan data. Mohon tunggu, layar Anda akan dimuat ulang otomatis begitu admin tersebut selesai.',
             icon: 'warning',
             confirmButtonText: 'Baik, Saya Mengerti',
             confirmButtonColor: '#4f46e5',

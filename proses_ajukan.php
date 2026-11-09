@@ -1,5 +1,5 @@
 <?php
-// proses_permohonan.php
+// proses_ajukan.php
 session_start();
 require_once 'config/database.php'; // Sesuaikan path jika database.php berada di folder config/
 
@@ -15,6 +15,9 @@ if (isset($_POST['submit_permohonan'])) {
     $jumlah_stock_akhir = (int)$_POST['jumlah_stock_akhir_eicv'];
     $jumlah_pemakaian   = (int)$_POST['jumlah_pemakaian_eicv'];
     $jumlah_permintaan  = (int)$_POST['jumlah_permintaan'];
+    
+    // VARIABEL BARU: LINK DOKUMENTASI
+    $link_dokumentasi   = mysqli_real_escape_string($conn, trim($_POST['link_dokumentasi'] ?? ''));
     
     $tanggal_faktur     = mysqli_real_escape_string($conn, $_POST['tanggal_faktur']);
     $nama_distributor   = mysqli_real_escape_string($conn, $_POST['nama_distributor']);
@@ -60,23 +63,31 @@ if (isset($_POST['submit_permohonan'])) {
         }
     }
 
-    // Pastikan kolom nama_kabupaten tersedia (dibuat otomatis bila belum ada)
+    // ==========================================================
+    // AUTO PATCH DATABASE: KABUPATEN & LINK DOKUMENTASI
+    // ==========================================================
     try {
-        $cek_kab = mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'nama_kabupaten'");
+        $cek_kab = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'nama_kabupaten'");
         if ($cek_kab && mysqli_num_rows($cek_kab) === 0) {
-            mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN nama_kabupaten VARCHAR(100) NULL AFTER nama_klinik");
+            @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN nama_kabupaten VARCHAR(100) NULL AFTER nama_klinik");
+        }
+        
+        $cek_link = @mysqli_query($conn, "SHOW COLUMNS FROM permohonan LIKE 'link_dokumentasi'");
+        if ($cek_link && mysqli_num_rows($cek_link) === 0) {
+            @mysqli_query($conn, "ALTER TABLE permohonan ADD COLUMN link_dokumentasi TEXT NULL AFTER jumlah_permintaan");
         }
     } catch (Throwable $ex) {}
+    // ==========================================================
 
-    // 4. Simpan ke Database
+    // 4. Simpan ke Database (Menyertakan link_dokumentasi)
     $query_insert = "INSERT INTO permohonan (
         kode_tracking, tanggal_permohonan, nama_pemohon, nama_klinik, nama_kabupaten, no_izin_penerbitan, masa_berlaku_izin,
-        jumlah_stock_akhir_eicv, jumlah_pemakaian_eicv, jumlah_permintaan,
+        jumlah_stock_akhir_eicv, jumlah_pemakaian_eicv, jumlah_permintaan, link_dokumentasi,
         tanggal_faktur, nama_distributor, no_invoice, jumlah_pembelian, merek_vaksin, batch_vaksin, exp_date,
         jenis_vaksin, jumlah_vaksin_mm, jumlah_vaksin_polio, file_syarat, status_permohonan
     ) VALUES (
         '$kode_tracking', '$tanggal_permohonan', '$nama_pemohon', '$nama_klinik', '$nama_kabupaten', '$no_izin_penerbitan', '$masa_berlaku_izin',
-        $jumlah_stock_akhir, $jumlah_pemakaian, $jumlah_permintaan,
+        $jumlah_stock_akhir, $jumlah_pemakaian, $jumlah_permintaan, '$link_dokumentasi',
         '$tanggal_faktur', '$nama_distributor', '$no_invoice', $jumlah_pembelian, '$merek_vaksin', '$batch_vaksin', '$exp_date',
         '$jenis_vaksin', $jumlah_vaksin_mm, $jumlah_vaksin_polio, '$nama_file_syarat', 'Menunggu'
     )";

@@ -175,6 +175,157 @@ function data_grafik($conn, $bulan_int, $tahun_int, $klinik = "") {
             'rasio' => [$rasio['menunggu'], $rasio['diproses'], $rasio['selesai'], $rasio['ditolak']]];
 }
 
+// ============ RIWAYAT AKTIVITAS + AKUN (tambahan) ============
+function pastikan_riwayat($conn) {
+    if (!empty($_SESSION['riwayat_ok2'])) return;
+    try {
+        mysqli_query($conn, "CREATE TABLE IF NOT EXISTS riwayat_aktivitas (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            waktu DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            aktor VARCHAR(100) NOT NULL DEFAULT 'Admin',
+            akun VARCHAR(100) NULL,
+            aksi VARCHAR(20) NOT NULL,
+            id_permohonan INT NULL,
+            kode_tracking VARCHAR(50) NULL,
+            klinik VARCHAR(200) NULL,
+            detail VARCHAR(255) NULL,
+            INDEX (waktu), INDEX (aksi)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $_SESSION['riwayat_ok2'] = true;
+    } catch (Throwable $t) { return; }
+    // Pencatatan otomatis proses / tolak / selesai lewat trigger database (tanpa mengubah file proses)
+    try {
+        $r = mysqli_query($conn, "SELECT COUNT(*) c FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_eicv_riwayat_upd2'");
+        $ada = $r ? (int)mysqli_fetch_assoc($r)['c'] : 0;
+        if (!$ada && cek_kolom_kunci($conn)) {
+            mysqli_query($conn, "DROP TRIGGER IF EXISTS trg_eicv_riwayat_upd");
+            mysqli_query($conn, "CREATE TRIGGER trg_eicv_riwayat_upd2 AFTER UPDATE ON permohonan FOR EACH ROW
+            BEGIN
+                IF NOT (OLD.status_permohonan <=> NEW.status_permohonan) THEN
+                    INSERT INTO riwayat_aktivitas (aktor, aksi, id_permohonan, kode_tracking, klinik, detail)
+                    VALUES (COALESCE(NULLIF(TRIM(@eicv_aktor), ''), NULLIF(TRIM(OLD.sedang_diproses_oleh), ''), NULLIF(TRIM(NEW.sedang_diproses_oleh), ''), 'Admin'),
+                            CASE NEW.status_permohonan WHEN 'Selesai' THEN 'selesai' WHEN 'Ditolak' THEN 'tolak' WHEN 'Diproses' THEN 'diproses' ELSE 'status' END,
+                            NEW.id_permohonan, NEW.kode_tracking, NEW.nama_klinik,
+                            CONCAT(COALESCE(OLD.status_permohonan, '-'), ' -> ', COALESCE(NEW.status_permohonan, '-')));
+                ELSEIF NEW.session_lock IS NOT NULL AND NOT (OLD.session_lock <=> NEW.session_lock) THEN
+                    INSERT INTO riwayat_aktivitas (aktor, aksi, id_permohonan, kode_tracking, klinik, detail)
+                    VALUES (COALESCE(NULLIF(TRIM(@eicv_aktor), ''), NULLIF(TRIM(NEW.sedang_diproses_oleh), ''), 'Admin'), 'proses',
+                            NEW.id_permohonan, NEW.kode_tracking, NEW.nama_klinik, 'Membuka untuk diproses');
+                END IF;
+            END");
+        }
+    } catch (Throwable $t) { /* tanpa hak TRIGGER: riwayat proses tidak aktif, fitur lain tetap jalan */ }
+}
+function riwayat_tambah($conn, $aktor, $akun, $aksi, $id, $kode, $klinik, $detail) {
+    try {
+        $st = mysqli_prepare($conn, "INSERT INTO riwayat_aktivitas (aktor, akun, aksi, id_permohonan, kode_tracking, klinik, detail) VALUES (?,?,?,?,?,?,?)");
+        mysqli_stmt_bind_param($st, 'sssisss', $aktor, $akun, $aksi, $id, $kode, $klinik, $detail);
+        mysqli_stmt_execute($st); mysqli_stmt_close($st);
+    } catch (Throwable $t) {}
+}
+function aktor_sekarang() {
+    $p = isset($_COOKIE['eicv_petugas']) ? trim(preg_replace('/\s+/u', ' ', (string)$_COOKIE['eicv_petugas'])) : '';
+    if ($p === '') $p = (string)($_SESSION['nama_lengkap'] ?? 'Admin');
+    return mb_substr($p, 0, 40);
+}
+function trigger_riwayat_aktif($conn) {
+    try {
+        $r = mysqli_query($conn, "SELECT COUNT(*) c FROM information_schema.TRIGGERS WHERE TRIGGER_SCHEMA = DATABASE() AND TRIGGER_NAME = 'trg_eicv_riwayat_upd2'");
+        return $r && (int)mysqli_fetch_assoc($r)['c'] > 0;
+    } catch (Throwable $t) { return false; }
+}
+if (isset($_SESSION['admin_logged_in'])) pastikan_riwayat($conn);
+
+// --- POST: catat penghapusan & ganti username / password ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['aksi']) && in_array($_POST['aksi'], ['log_hapus', 'ganti_akun'], true)) {
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store');
+    if (!isset($_SESSION['admin_logged_in'])) { http_response_code(401); echo '{"ok":false,"pesan":"Sesi berakhir. Silakan login ulang."}'; exit(); }
+    if (!hash_equals((string)$_SESSION['csrf_hapus'], (string)($_POST['csrf'] ?? ''))) { http_response_code(403); echo '{"ok":false,"pesan":"Sesi formulir tidak valid. Muat ulang halaman."}'; exit(); }
+    $akun_now = (string)($_SESSION['admin_username'] ?? '');
+
+    if ($_POST['aksi'] === 'log_hapus') {
+        $ids = array_values(array_unique(array_filter(array_map('intval', (array)($_POST['ids'] ?? [])), function ($v) { return $v > 0; })));
+        if ($ids) {
+            $in = implode(',', $ids);
+            $q = mysqli_query($conn, "SELECT id_permohonan, kode_tracking, nama_klinik, status_permohonan FROM permohonan WHERE id_permohonan IN ($in)");
+            $aktor = aktor_sekarang();
+            while ($q && ($r = mysqli_fetch_assoc($q))) {
+                riwayat_tambah($conn, $aktor, $akun_now, 'hapus', (int)$r['id_permohonan'], $r['kode_tracking'], $r['nama_klinik'], 'Status saat dihapus: ' . $r['status_permohonan']);
+            }
+        }
+        echo '{"ok":true}'; exit();
+    }
+
+    // ganti_akun
+    $kirim = function ($ok, $pesan, $extra = []) { echo json_encode(array_merge(['ok' => $ok, 'pesan' => $pesan], $extra), JSON_UNESCAPED_UNICODE); exit(); };
+    if (!empty($_SESSION['akun_kunci']) && $_SESSION['akun_kunci'] > time()) $kirim(false, 'Terlalu banyak percobaan. Coba lagi dalam ' . ($_SESSION['akun_kunci'] - time()) . ' detik.');
+    $pw_lama = (string)($_POST['password_lama'] ?? '');
+    $u_baru  = trim((string)($_POST['username_baru'] ?? ''));
+    $pw_baru = (string)($_POST['password_baru'] ?? '');
+    $pw_konf = (string)($_POST['password_konfirmasi'] ?? '');
+    if ($pw_lama === '') $kirim(false, 'Password saat ini wajib diisi.');
+    if (!preg_match('/^[A-Za-z0-9_.\-]{4,30}$/', $u_baru)) $kirim(false, 'Username 4-30 karakter: huruf, angka, titik, garis bawah, atau strip.');
+    if ($pw_baru !== '') {
+        if (strlen($pw_baru) < 6) $kirim(false, 'Password baru minimal 6 karakter.');
+        if ($pw_baru !== $pw_konf) $kirim(false, 'Konfirmasi password baru tidak sama.');
+    }
+    try {
+        if ($akun_now === '') {
+            $stn = mysqli_prepare($conn, "SELECT username FROM admin WHERE nama_lengkap = ? LIMIT 1");
+            $nl = (string)($_SESSION['nama_lengkap'] ?? '');
+            mysqli_stmt_bind_param($stn, 's', $nl); mysqli_stmt_execute($stn);
+            $rn = mysqli_stmt_get_result($stn); $rw = $rn ? mysqli_fetch_assoc($rn) : null;
+            $akun_now = (string)($rw['username'] ?? '');
+        }
+        if ($akun_now === '') $kirim(false, 'Akun tidak ditemukan. Login ulang lalu coba lagi.');
+        $st = mysqli_prepare($conn, "SELECT * FROM admin WHERE username = ? LIMIT 1");
+        mysqli_stmt_bind_param($st, 's', $akun_now); mysqli_stmt_execute($st);
+        $res = mysqli_stmt_get_result($st); $adm = $res ? mysqli_fetch_assoc($res) : null;
+        if (!$adm) $kirim(false, 'Akun tidak ditemukan.');
+        $tersimpan = (string)$adm['password'];
+        $valid = (strpos($tersimpan, '$2y$') === 0 || strpos($tersimpan, '$argon') === 0)
+            ? password_verify($pw_lama, $tersimpan)
+            : hash_equals(strtolower($tersimpan), md5($pw_lama));
+        if (!$valid) {
+            $_SESSION['akun_gagal'] = ($_SESSION['akun_gagal'] ?? 0) + 1;
+            if ($_SESSION['akun_gagal'] >= 5) { $_SESSION['akun_kunci'] = time() + 60; $_SESSION['akun_gagal'] = 0; }
+            usleep(400000);
+            $kirim(false, 'Password saat ini salah.');
+        }
+        $_SESSION['akun_gagal'] = 0;
+        if ($u_baru === $akun_now && $pw_baru === '') $kirim(false, 'Tidak ada perubahan untuk disimpan.');
+        if ($u_baru !== $akun_now) {
+            $cu = mysqli_prepare($conn, "SELECT 1 FROM admin WHERE username = ? LIMIT 1");
+            mysqli_stmt_bind_param($cu, 's', $u_baru); mysqli_stmt_execute($cu);
+            $rc = mysqli_stmt_get_result($cu);
+            if ($rc && mysqli_num_rows($rc) > 0) $kirim(false, 'Username sudah dipakai akun lain.');
+        }
+        $hash_baru = $tersimpan;
+        if ($pw_baru !== '') {
+            // pastikan kolom password cukup panjang untuk hash modern
+            $kc = mysqli_query($conn, "SHOW COLUMNS FROM admin LIKE 'password'");
+            $kr = $kc ? mysqli_fetch_assoc($kc) : null;
+            if ($kr && preg_match('/\((\d+)\)/', (string)$kr['Type'], $mm) && (int)$mm[1] < 100) {
+                mysqli_query($conn, "ALTER TABLE admin MODIFY password VARCHAR(255) NOT NULL");
+            }
+            $hash_baru = password_hash($pw_baru, PASSWORD_DEFAULT);
+        }
+        $up = mysqli_prepare($conn, "UPDATE admin SET username = ?, password = ? WHERE username = ? LIMIT 1");
+        mysqli_stmt_bind_param($up, 'sss', $u_baru, $hash_baru, $akun_now); mysqli_stmt_execute($up);
+        if (mysqli_stmt_errno($up)) $kirim(false, 'Gagal menyimpan perubahan.');
+        $_SESSION['admin_username'] = $u_baru;
+        $_SESSION['csrf_hapus'] = $_SESSION['csrf_hapus'];
+        $ket = [];
+        if ($u_baru !== $akun_now) $ket[] = 'username ' . $akun_now . ' -> ' . $u_baru;
+        if ($pw_baru !== '') $ket[] = 'password diganti';
+        riwayat_tambah($conn, aktor_sekarang(), $u_baru, 'akun', null, null, null, implode('; ', $ket));
+        $kirim(true, 'Akun berhasil diperbarui.', ['username' => $u_baru]);
+    } catch (Throwable $t) {
+        $kirim(false, 'Terjadi kesalahan saat menyimpan. Coba lagi.');
+    }
+}
+
 // --- ENDPOINT AJAX (real-time & live search) ---
 if (isset($_GET['ajax'])) {
     if (!isset($_SESSION['admin_logged_in'])) {
@@ -183,6 +334,23 @@ if (isset($_GET['ajax'])) {
     $GLOBALS['ada_kunci'] = cek_kolom_kunci($conn);
     session_write_close();
     header('Cache-Control: no-store');
+    if ($_GET['ajax'] === 'riwayat') {
+        header('Content-Type: application/json; charset=utf-8');
+        try {
+            $mx = mysqli_query($conn, "SELECT COALESCE(MAX(id),0) m FROM riwayat_aktivitas WHERE aksi IN ('selesai','tolak','hapus')");
+            $max = $mx ? (int)mysqli_fetch_assoc($mx)['m'] : 0;
+            if (isset($_GET['ringkas'])) {
+                $since = isset($_GET['since']) ? (int)$_GET['since'] : 0;
+                $cq = mysqli_query($conn, "SELECT COUNT(*) c FROM riwayat_aktivitas WHERE id > $since AND aksi IN ('selesai','tolak','hapus')");
+                echo json_encode(['max' => $max, 'baru' => $cq ? (int)mysqli_fetch_assoc($cq)['c'] : 0]); exit();
+            }
+            $rows = [];
+            $q = mysqli_query($conn, "SELECT id, waktu, aktor, akun, aksi, id_permohonan, kode_tracking, klinik, detail FROM riwayat_aktivitas WHERE aksi IN ('selesai','tolak','hapus') ORDER BY id DESC LIMIT 300");
+            while ($q && ($r = mysqli_fetch_assoc($q))) $rows[] = $r;
+            echo json_encode(['max' => $max, 'rows' => $rows, 'trigger' => trigger_riwayat_aktif($conn)], JSON_UNESCAPED_UNICODE);
+        } catch (Throwable $t) { echo json_encode(['max' => 0, 'rows' => [], 'trigger' => false]); }
+        exit();
+    }
     $search_raw = isset($_GET['search']) ? trim($_GET['search']) : "";
     $bulan_int  = isset($_GET['bulan']) && ctype_digit($_GET['bulan']) ? (int)$_GET['bulan'] : 0;
     $tahun_int  = isset($_GET['tahun']) && ctype_digit($_GET['tahun']) ? (int)$_GET['tahun'] : 0;
@@ -376,6 +544,11 @@ $grafik = data_grafik($conn, $bulan_int, $tahun_int, $filter_klinik);
         .cek { width: 18px; height: 18px; cursor: pointer; accent-color: #dc2626; }
         .btn-hapus { display:none; background: linear-gradient(135deg,#ef4444,#b91c1c); border:0; }
         .btn-hapus.show { display:inline-flex; }
+        /* Tombol hapus: melayang di tengah layar, ukuran sama dengan tombol "Ya, Hapus" */
+        .btn-hapus.show { position: fixed; left: 0; right: 0; bottom: 36px; margin: 0 auto; width: max-content; z-index: 1045;
+            padding: .375rem 1.5rem !important; font-size: 1rem !important; box-shadow: 0 14px 34px -8px rgba(185,28,28,.55) !important;
+            animation: hapusMuncul .22s cubic-bezier(.2,.8,.2,1); }
+        @keyframes hapusMuncul { from { opacity: 0; transform: translateY(14px) scale(.96); } }
         .data-row.dipilih td { background: rgba(239,68,68,.08) !important; }
         .data-row { transition: background .2s; }
         .data-row:hover td { background: var(--row-hover) !important; }
@@ -501,7 +674,7 @@ mark.cari { background: linear-gradient(120deg, rgba(250,204,21,.65), rgba(251,1
 [data-theme="dark"] mark.cari { background: linear-gradient(120deg, rgba(250,204,21,.32), rgba(251,146,60,.28)); color: #fde68a; box-shadow: 0 0 0 1px rgba(250,204,21,.4); }
 .data-row.sembunyi-cari { display: none; }
 
-/* Pratinjau dokumen: ringan saat di-scroll (tanpa scroll bersarang, tanpa sudut membulat pada iframe, animasi latar dijeda) */
+/* Pratinjau dokumen */
 #modalLihatPDF .modal-content { display: flex; flex-direction: column; height: 90vh; box-shadow: none; }
 #modalLihatPDF .modal-body { flex: 1 1 auto; min-height: 0; height: auto !important; padding: 8px 12px 12px; position: relative; overflow: hidden; }
 #frameLihatPDF { display: block; width: 100%; height: 100%; border: 0; border-radius: 0 !important; background: #f8fafc; }
@@ -536,69 +709,264 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
 </div>
 <div class="bg-fade"></div>
 
-<nav class="navbar navbar-expand-lg navbar-admin sticky-top py-3 mb-4">
-    <div class="container-fluid px-4 px-md-5">
-        <a class="navbar-brand fw-bold fs-4 d-flex align-items-center gap-2" href="dashboard.php">
-            <div class="rounded-3 p-2 text-white d-flex align-items-center justify-content-center shadow-sm" style="background: var(--grad); width: 38px; height: 38px;">
-                <i class="bi bi-shield-lock-fill fs-6"></i>
-            </div>
-            <span class="brand-text">Admin Portal</span>
+<button type="button" class="side-hamburger" id="sideToggle" aria-label="Buka menu" aria-controls="sideAdmin"><i class="bi bi-list"></i></button>
+<div class="side-backdrop" id="sideBackdrop"></div>
+
+<nav class="navbar-admin side-admin" id="sideAdmin" aria-label="Menu utama">
+    <div class="side-head">
+        <a class="navbar-brand side-brand" href="dashboard.php">
+            <svg class="monika-logo" viewBox="0 0 56 56" width="48" height="48" role="img" aria-label="Logo MONIKA">
+                <defs>
+                    <linearGradient id="mkFace" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8b7bff"/><stop offset=".45" stop-color="#3b6cf6"/><stop offset="1" stop-color="#06b6d4"/></linearGradient>
+                    <linearGradient id="mkSide" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#3730a3"/><stop offset="1" stop-color="#1e1b6e"/></linearGradient>
+                    <linearGradient id="mkGloss" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+                    <linearGradient id="mkM" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#c7d2fe"/></linearGradient>
+                    <linearGradient id="mkShine" x1="0" x2="1"><stop offset="0" stop-color="#fff" stop-opacity="0"/><stop offset=".5" stop-color="#fff" stop-opacity=".55"/><stop offset="1" stop-color="#fff" stop-opacity="0"/></linearGradient>
+                    <linearGradient id="mkPulse" x1="0" x2="1"><stop offset="0" stop-color="#a5f3fc"/><stop offset="1" stop-color="#6ee7b7"/></linearGradient>
+                    <clipPath id="mkClip"><rect x="3" y="2" width="46" height="46" rx="15"/></clipPath>
+                </defs>
+                <ellipse class="mk-ground" cx="27" cy="53" rx="17" ry="2.4" fill="#1e1b6e" opacity=".35"/>
+                <g class="mk-float">
+                    <rect x="3" y="8.5" width="46" height="46" rx="15" fill="#1a1760"/>
+                    <rect x="3" y="6" width="46" height="46" rx="15" fill="url(#mkSide)"/>
+                    <rect x="3" y="2" width="46" height="46" rx="15" fill="url(#mkFace)"/>
+                    <g clip-path="url(#mkClip)">
+                        <rect x="3" y="2" width="46" height="23" fill="url(#mkGloss)" opacity=".7"/>
+                        <rect class="mk-shine" x="-24" y="-4" width="16" height="64" fill="url(#mkShine)" transform="skewX(-18)"/>
+                    </g>
+                    <rect x="3.8" y="2.8" width="44.4" height="44.4" rx="14.3" fill="none" stroke="#fff" stroke-opacity=".35" stroke-width="1.2"/>
+                    <path d="M12.5 29.5 V14 L26 26 L39.5 14 V29.5" fill="none" stroke="#1e1b6e" stroke-opacity=".38" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" transform="translate(0 2.2)"/>
+                    <path d="M12.5 29.5 V14 L26 26 L39.5 14 V29.5" fill="none" stroke="url(#mkM)" stroke-width="4.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path d="M6 37 H18 L21 32.5 L24.5 41 L28 34 L30.5 37 H46" fill="none" stroke="#fff" stroke-opacity=".22" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+                    <path class="mk-pulse" pathLength="100" d="M6 37 H18 L21 32.5 L24.5 41 L28 34 L30.5 37 H46" fill="none" stroke="url(#mkPulse)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+                    <circle class="mk-ring" cx="41" cy="11" r="3" fill="#34d399"/>
+                    <circle cx="41" cy="11" r="3" fill="#34d399" stroke="#fff" stroke-width="1.2"/>
+                </g>
+            </svg>
+            <span class="brand-text"><b>MONIKA</b></span>
         </a>
-        <div class="d-flex align-items-center gap-2 gap-md-3">
-            <button type="button" class="theme-btn" id="themeToggle" aria-label="Ganti tema">
-                <i class="bi bi-moon-stars-fill"></i><i class="bi bi-sun-fill"></i>
-            </button>
-            <div class="dropdown">
-                <button type="button" class="theme-btn position-relative border-0 shadow-sm" id="notifToggle" data-bs-toggle="dropdown" aria-expanded="false" data-bs-auto-close="outside">
-                    <i class="bi bi-bell-fill"></i>
-                    <span class="notif-badge" id="notifCount" hidden>0</span>
-                </button>
-                <div class="dropdown-menu dropdown-menu-end notif-dropdown mt-2" aria-labelledby="notifToggle">
-                    <div class="notif-header">
-                        <h6>Notifikasi</h6>
-                        <span id="notifSub">terbaru</span>
-                    </div>
-                    <div id="notifList">
-                        <div class="notif-empty" id="notifEmpty">Belum ada notifikasi baru</div>
-                    </div>
-                </div>
-            </div>
-            <button type="button" class="petugas-chip" id="btnPetugas" title="Ubah nama petugas">
-                <i class="bi bi-person-badge-fill"></i><span id="namaPetugas">Isi nama</span><i class="bi bi-pencil-fill"></i>
-            </button>
-            <div class="user-chip d-none d-md-flex align-items-center gap-2 px-3 py-2 rounded-pill shadow-sm">
-                <i class="bi bi-person-circle fs-5" style="color: var(--primary);"></i>
-                <span class="fw-semibold small ink"><?php echo e($_SESSION['nama_lengkap'] ?? 'Admin'); ?></span>
-            </div>
-            <a href="logout.php" class="btn btn-executive btn-logout-merah px-4 py-2 small">
-                <i class="bi bi-box-arrow-right me-1"></i> Keluar
-            </a>
-        </div>
+        <button type="button" class="side-collapse" id="sideCollapse" title="Perkecil sidebar" aria-label="Perkecil sidebar"><i class="bi bi-list"></i></button>
+    </div>
+
+    <div class="side-scroll">
+        <div class="side-sec">Menu</div>
+        <a href="dashboard.php" class="side-link active" title="Dashboard"><i class="bi bi-grid-1x2-fill"></i><span>Dashboard</span></a>
+        <a href="kelola_klinik.php" class="side-link" title="Kelola Klinik"><i class="bi bi-hospital-fill"></i><span>Kelola Klinik</span></a>
+        <button type="button" class="side-link" id="btnRiwayat" title="Riwayat aktivitas" aria-label="Riwayat aktivitas">
+            <i class="bi bi-clock-history"></i><span>Riwayat Aktivitas</span><span class="notif-badge" id="riwayatBadge" hidden>0</span>
+        </button>
+        <button type="button" class="side-link" id="notifToggle" aria-haspopup="dialog" title="Notifikasi">
+            <i class="bi bi-bell-fill"></i><span>Notifikasi</span>
+            <span class="notif-badge" id="notifCount" hidden>0</span>
+        </button>
+
+        <div class="side-sec">Laporan</div>
+        <button type="button" class="side-link" data-bs-toggle="modal" data-bs-target="#modalBulanan" title="Filter &amp; Cetak Bulanan">
+            <i class="bi bi-calendar-range"></i><span>Filter &amp; Cetak Bulanan</span>
+        </button>
+        <a href="export_pdf.php?<?php echo $export_qs; ?>" id="btnExportPdf" target="_blank" class="side-link side-pdf" title="Export PDF">
+            <i class="bi bi-file-earmark-pdf-fill"></i><span>Export PDF</span>
+        </a>
+        <a href="export_excel.php?<?php echo $export_qs; ?>" id="btnExportExcel" target="_blank" class="side-link side-xls" title="Export Excel">
+            <i class="bi bi-file-earmark-excel-fill"></i><span>Export Excel</span>
+        </a>
+
+        <div class="side-sec">Pengaturan</div>
+        <button type="button" class="side-link petugas-chip" id="btnPetugas" title="Ubah nama petugas">
+            <i class="bi bi-person-badge-fill"></i><span id="namaPetugas">Isi nama</span><i class="bi bi-pencil-fill"></i>
+        </button>
+        <button type="button" class="side-link user-chip" id="btnAkun" title="Ganti username &amp; password">
+            <i class="bi bi-person-circle"></i>
+            <span><?php echo e($_SESSION['nama_lengkap'] ?? 'Admin'); ?></span>
+            <i class="bi bi-gear-fill"></i>
+        </button>
+        <button type="button" id="btnAkunM" hidden aria-hidden="true" tabindex="-1"></button>
+        <button type="button" class="side-link theme-btn" id="themeToggle" aria-label="Ganti tema" title="Ganti tema">
+            <i class="bi bi-moon-stars-fill"></i><i class="bi bi-sun-fill"></i><span>Ganti Tema</span>
+        </button>
+    </div>
+
+    <div class="side-foot">
+        <a href="logout.php" class="btn btn-executive btn-logout-merah px-4 py-2 small" title="Keluar">
+            <i class="bi bi-box-arrow-right me-1"></i><span class="lbl">Keluar</span>
+        </a>
     </div>
 </nav>
+
+<style>
+/* ===== SIDEBAR MENU (menggantikan navbar atas; semua tombol & id tetap sama) ===== */
+:root { --side-w: 264px; }
+.side-admin, .side-admin * { box-sizing: border-box; }
+.side-admin { position: fixed; top: 0; bottom: 0; left: 0; width: var(--side-w); z-index: 1030; display: flex; flex-direction: column;
+    padding: 16px 12px 14px; background: var(--nav); border-right: 1px solid var(--border); border-bottom: 0; }
+.side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 14px; margin-bottom: 6px; border-bottom: 1px solid var(--border); }
+.side-brand { display: flex; align-items: center; gap: 10px; min-width: 0; text-decoration: none; font-weight: 800; font-size: 1.2rem; }
+.side-brand .brand-text { display: flex; flex-direction: column; line-height: 1.05; white-space: nowrap; min-width: 0; }
+.side-brand .brand-text b { font-size: 1.4rem; font-weight: 800; letter-spacing: .09em; filter: drop-shadow(0 2px 0 rgba(30,27,110,.28)); background: var(--grad); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.monika-logo { flex: none; display: block; overflow: visible; transition: transform .35s cubic-bezier(.2,.8,.2,1); transform-origin: 50% 60%; }
+.side-brand:hover .monika-logo { transform: perspective(180px) rotateY(-16deg) rotateX(9deg) scale(1.07); }
+.mk-float { animation: mkBob 3.8s ease-in-out infinite; }
+.mk-ground { transform-box: fill-box; transform-origin: center; animation: mkGround 3.8s ease-in-out infinite; }
+.mk-shine { animation: mkShine 4.6s ease-in-out infinite; }
+.mk-pulse { stroke-dasharray: 30 100; animation: mkPulse 2.4s linear infinite; }
+.mk-ring { transform-box: fill-box; transform-origin: center; animation: mkRing 2s ease-out infinite; }
+@keyframes mkBob { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.2px); } }
+@keyframes mkGround { 0%, 100% { transform: scaleX(1); opacity: .35; } 50% { transform: scaleX(.82); opacity: .22; } }
+@keyframes mkShine { 0%, 55% { transform: translateX(0) skewX(-18deg); } 100% { transform: translateX(120px) skewX(-18deg); } }
+@keyframes mkPulse { from { stroke-dashoffset: 130; } to { stroke-dashoffset: 0; } }
+@keyframes mkRing { 0% { transform: scale(1); opacity: .7; } 100% { transform: scale(2.8); opacity: 0; } }
+body.modal-ringan .monika-logo *, body.pdf-aktif .monika-logo * { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) { .monika-logo *, .side-brand:hover .monika-logo { animation: none !important; transform: none; } }
+.side-collapse { flex: none; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 11px; border: 1px solid var(--border); background: var(--surface-2); color: var(--muted); font-size: 1.35rem; cursor: pointer; transition: color .2s, border-color .2s, background .2s; }
+.side-collapse:hover { color: var(--primary); border-color: var(--primary); background: var(--row-hover); }
+.side-collapse:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.side-scroll { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 2px 0; overscroll-behavior: contain; scrollbar-width: none; }
+.side-scroll::-webkit-scrollbar { display: none; }
+.side-sec { font-size: .68rem; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); opacity: .8; padding: 12px 12px 4px; }
+.side-sec:first-child { padding-top: 4px; }
+.side-admin .side-link { display: flex; align-items: center; gap: 12px; width: 100%; height: auto; padding: 9px 12px; margin: 1px 0;
+    border: 0; border-radius: 12px; background: transparent; color: var(--muted); font-weight: 600; font-size: .9rem; line-height: 1.3; text-align: left; text-decoration: none;
+    cursor: pointer; position: relative; transition: background .2s, color .2s; box-shadow: none; transform: none; }
+.side-admin .side-link > i { width: 22px; flex: none; text-align: center; font-size: 1.1rem; }
+.side-admin .side-link > span:not(.notif-badge) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: inherit !important; }
+.side-admin .side-link > i:last-child:not(:first-child) { flex: none; width: auto; margin-left: auto; font-size: .78rem; opacity: .55; }
+.side-admin .side-link:hover { background: var(--row-hover); color: var(--text); transform: none; }
+.side-admin .side-link.active { background: var(--grad); color: #fff; box-shadow: 0 8px 18px -8px rgba(79,70,229,.6); }
+.side-admin .side-link:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.side-admin .notif-badge { position: static; margin-left: auto; flex: none; border: 0; padding: 3px 8px; }
+.side-admin .petugas-chip #namaPetugas { max-width: none; }
+.side-admin .dropdown { position: static; }
+.side-admin .notif-dropdown { z-index: 2000; }
+.side-foot { padding-top: 12px; border-top: 1px solid var(--border); }
+.side-foot .btn-logout-merah { display: flex; align-items: center; justify-content: center; width: 100%; }
+.side-hamburger, .side-backdrop { display: none; }
+.side-admin .side-pdf > i { color: #ef4444; }
+.side-admin .side-xls > i { color: #16a34a; }
+.side-admin .side-pdf:hover, .side-admin .side-xls:hover { color: var(--text); }
+.side-foot .btn-logout-merah i { margin-right: .25rem; }
+
+/* Mode sidebar kecil (hanya ikon) - desktop */
+@media (min-width: 992px) {
+    .side-admin { transition: width .2s ease; }
+    body { transition: padding-left .2s ease; }
+    html.side-mini { --side-w: 78px; }
+    html.side-mini .side-admin { padding-left: 10px; padding-right: 10px; }
+    html.side-mini .side-head { flex-direction: column; justify-content: center; gap: 10px; padding-bottom: 12px; }
+    html.side-mini .side-brand .brand-text,
+    html.side-mini .side-admin .side-link > span:not(.notif-badge),
+    html.side-mini .side-admin .side-link > i:last-child:not(:first-child),
+    html.side-mini .side-foot .btn-logout-merah .lbl { display: none; }
+    html.side-mini .side-sec { height: 1px; margin: 10px 12px; padding: 0; font-size: 0; background: var(--border); opacity: 1; }
+    html.side-mini .side-admin .side-link { justify-content: center; padding: 12px 0; gap: 0; }
+    html.side-mini .side-admin .side-link > i { width: 1.4rem; font-size: 1.2rem; }
+    html.side-mini .side-admin .notif-badge { position: absolute; top: 3px; right: 8px; margin: 0; padding: 2px 5px; font-size: .6rem; }
+    html.side-mini .side-foot .btn-logout-merah { padding-left: 0 !important; padding-right: 0 !important; }
+    html.side-mini .side-foot .btn-logout-merah i { margin: 0; }
+}
+@media (max-width: 991.98px) { .side-collapse { display: none !important; } }
+@media (min-width: 992px) and (max-height: 820px) {
+    .side-admin .side-link { padding: 7px 12px; }
+    .side-sec { padding-top: 8px; }
+    .side-head { padding-bottom: 10px; }
+}
+
+@media (min-width: 992px) {
+    body { padding-left: var(--side-w); }
+}
+@media (min-width: 992px) and (max-width: 1399.98px) {
+    #kpiRow > .col-xl { flex: 0 0 auto; width: 33.3333%; }
+}
+@media (max-width: 991.98px) {
+    body { padding-top: 66px; }
+    .side-hamburger { display: grid; place-items: center; position: fixed; top: 12px; left: 14px; z-index: 1029; width: 44px; height: 44px; border-radius: 12px;
+        border: 1px solid var(--border); background: var(--surface-2); color: var(--text); font-size: 1.5rem; cursor: pointer; box-shadow: 0 4px 14px rgba(0,0,0,.08); }
+    .side-admin { transform: translateX(-102%); transition: transform .25s cubic-bezier(.2,.8,.2,1); box-shadow: none; max-width: 86vw; }
+    body.side-open .side-admin { transform: none; box-shadow: 0 0 40px rgba(0,0,0,.35); }
+    .side-backdrop { display: block; position: fixed; inset: 0; z-index: 1025; background: rgba(15,23,42,.5); opacity: 0; pointer-events: none; transition: opacity .2s; }
+    body.side-open .side-backdrop { opacity: 1; pointer-events: auto; }
+}
+@media (prefers-reduced-motion: reduce) { .side-admin, .side-backdrop { transition: none !important; } }
+/* ===== TAMPILAN HP / TABLET: rapi, tanpa elemen berantakan ===== */
+@media (max-width: 991.98px) {
+    .side-admin .notif-dropdown { position: fixed !important; left: 12px !important; right: 12px !important; top: 74px !important; bottom: auto !important;
+        width: auto !important; max-width: none; transform: none !important; max-height: 70vh; margin: 0 !important; }
+    .side-admin { width: min(300px, 86vw); }
+}
+@media (max-width: 767.98px) {
+    body > .container-fluid { padding-left: 12px !important; padding-right: 12px !important; }
+    body > .container-fluid h3 { font-size: 1.25rem; }
+    #areaTabelData { padding: 1rem !important; border-radius: 20px; }
+    .chart-card { padding: 1rem; }
+    .kpi { padding: 12px 14px; gap: 10px; border-radius: 16px; }
+    .kpi-num { font-size: 1.35rem; }
+    .kpi-sub { font-size: .66rem; }
+    .bulan-bar { gap: 10px; }
+    .year-switch { width: 100%; justify-content: center; }
+    .bulan-strip { flex: 1 1 100%; grid-template-columns: repeat(6, minmax(0, 1fr)); }
+    .search-wrapper { flex: 1 1 100%; }
+    .btn-hapus.show { bottom: 20px; max-width: calc(100vw - 24px); }
+    .live-toast { left: 12px; right: 12px; bottom: 16px; max-width: none; }
+
+    /* Tabel menjadi kartu per permohonan */
+    .table-responsive { overflow: visible; }
+    .table, .table tbody { display: block; width: 100%; }
+    .table thead { display: none; }
+    .table tr.data-row {
+        display: grid; grid-template-columns: 26px minmax(0, 1fr) auto; gap: 8px 10px; align-items: center;
+        grid-template-areas: "cek tgl sts" "kl kl kl" "kode kode kode" "kab kab jml" "aksi aksi aksi";
+        padding: 14px; margin-bottom: 12px; border: 1px solid var(--border); border-radius: 18px; background: var(--surface-2);
+    }
+    .table tr.data-row > td { display: block; padding: 0 !important; border: 0 !important; background: transparent !important; text-align: left !important; min-width: 0; }
+    .table tr.data-row.dipilih { background: rgba(239,68,68,.08); border-color: rgba(239,68,68,.35); }
+    .table tr.data-row > td:nth-child(1) { grid-area: cek; }
+    .table tr.data-row > td:nth-child(2) { display: none; }
+    .table tr.data-row > td:nth-child(3) { grid-area: tgl; }
+    .table tr.data-row > td:nth-child(4) { grid-area: kode; }
+    .table tr.data-row > td:nth-child(5) { grid-area: kl; }
+    .table tr.data-row > td:nth-child(6) { grid-area: kab; }
+    .table tr.data-row > td:nth-child(6)::before { content: "Kab/Kota: "; font-size: .72rem; font-weight: 700; color: var(--muted); }
+    .table tr.data-row > td:nth-child(7) { grid-area: jml; justify-self: end; }
+    .table tr.data-row > td:nth-child(7)::before { content: "Jumlah: "; font-size: .72rem; font-weight: 700; color: var(--muted); }
+    .table tr.data-row > td:nth-child(8) { grid-area: sts; justify-self: end; text-align: right !important; }
+    .table tr.data-row > td:nth-child(9) { grid-area: aksi; text-align: center !important; padding-top: 4px !important; border-top: 1px dashed var(--border) !important; }
+    .table tr.data-row .alasan-tolak { max-width: none; }
+    .table tr.data-row .kunci-aksi { max-width: none; }
+    .table tr.data-row.sembunyi-cari { display: none; }
+    .table tbody tr:not(.data-row) { display: block; }
+    .table tbody tr:not(.data-row) > td { display: block; width: 100%; }
+}
+@media (max-width: 400px) {
+    .bulan-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+</style>
+
+<script>
+(function () {
+    const body = document.body, tg = document.getElementById('sideToggle'), bd = document.getElementById('sideBackdrop'), side = document.getElementById('sideAdmin');
+    const tutup = () => { body.classList.remove('side-open'); tg.setAttribute('aria-expanded', 'false'); };
+    tg.addEventListener('click', () => { const o = body.classList.toggle('side-open'); tg.setAttribute('aria-expanded', o ? 'true' : 'false'); });
+    bd.addEventListener('click', tutup);
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') tutup(); });
+    side.addEventListener('click', e => { if (e.target.closest('a.side-link, #btnRiwayat, #btnPetugas, #btnAkun, #notifToggle')) tutup(); });
+    // Perbesar / perkecil sidebar (tersimpan di browser)
+    const root = document.documentElement, cb = document.getElementById('sideCollapse');
+    const atur = mini => {
+        root.classList.toggle('side-mini', mini);
+        const t = mini ? 'Perbesar sidebar' : 'Perkecil sidebar'; cb.title = t; cb.setAttribute('aria-label', t);
+        try { localStorage.setItem('eicv-side-mini', mini ? '1' : '0'); } catch (e) {}
+    };
+    let awal = false; try { awal = localStorage.getItem('eicv-side-mini') === '1'; } catch (e) {}
+    atur(awal);
+    cb.addEventListener('click', () => atur(!root.classList.contains('side-mini')));
+})();
+</script>
 
 <div class="container-fluid px-4 px-md-5 mb-5">
     <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center mb-4 gap-3">
         <div>
             <h3 class="fw-bold ink mb-1">Data Pengajuan Masuk<span class="live-dot" id="liveDot">LIVE</span></h3>
             <p class="soft small mb-0">Kelola verifikasi, rekapitulasi, dan monitoring izin e-ICV klinik secara terpusat.</p>
-        </div>
-        <div class="d-flex flex-wrap gap-2">
-            <button type="button" class="btn btn-executive text-white fw-bold d-flex align-items-center gap-2" style="background: var(--grad);" data-bs-toggle="modal" data-bs-target="#modalBulanan">
-                <i class="bi bi-calendar-range"></i> Filter &amp; Cetak Bulanan
-            </button>
-            <a href="export_pdf.php?<?php echo $export_qs; ?>" id="btnExportPdf" target="_blank" class="btn btn-executive btn-danger text-white d-flex align-items-center gap-2">
-                <i class="bi bi-file-earmark-pdf-fill"></i> PDF
-            </a>
-            <a href="export_excel.php?<?php echo $export_qs; ?>" id="btnExportExcel" class="btn btn-executive btn-success text-white d-flex align-items-center gap-2">
-                <i class="bi bi-file-earmark-excel-fill"></i> Excel
-            </a>
-            <a href="kelola_klinik.php" class="btn btn-executive text-white fw-bold d-flex align-items-center gap-2" style="background: #0ea5e9;">
-                <i class="bi bi-hospital-fill"></i> Kelola Klinik
-            </a>
-            <button type="button" id="btnHapus" class="btn btn-executive btn-hapus text-white fw-bold align-items-center gap-2" data-bs-toggle="modal" data-bs-target="#modalHapus">
-                <i class="bi bi-trash3-fill"></i> Hapus Terpilih (<span id="jmlPilih">0</span>)
-            </button>
         </div>
     </div>
 
@@ -667,7 +1035,7 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         </div>
     </div>
 
-    <!-- AREA TABEL DENGAN ID (Untuk target auto-scroll saat klik KPI) -->
+    <!-- AREA TABEL DENGAN ID -->
     <div class="glass-card p-4 p-md-5" id="areaTabelData">
         <!-- NAVIGASI BULAN -->
         <div class="bulan-bar">
@@ -693,6 +1061,9 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         </div>
 
         <div class="toolbar">
+            <button type="button" id="btnHapus" class="btn btn-executive btn-hapus text-white fw-bold align-items-center gap-2" data-bs-toggle="modal" data-bs-target="#modalHapus">
+                <i class="bi bi-trash3-fill"></i> Hapus Terpilih (<span id="jmlPilih">0</span>)
+            </button>
             <div class="search-wrapper">
                 <i class="bi bi-search soft fs-5 ms-2"></i>
                 <input type="text" id="liveSearchInput" class="form-control" placeholder="Cari berdasarkan klinik, pemohon, kode tracking, tanggal, bulan, atau tahun..." value="<?php echo e($search_raw); ?>" autocomplete="off">
@@ -790,7 +1161,7 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
     </div>
 </div>
 
-<!-- MODAL FILTER BULANAN (DENGAN KLINIK) -->
+<!-- MODAL FILTER BULANAN -->
 <div class="modal fade" id="modalBulanan" tabindex="-1" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content p-3">
@@ -853,6 +1224,245 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
     </div>
 </div>
 
+<style>
+.rw-box { width: min(760px, 100%); max-height: min(86vh, 760px); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.rw-head { display: flex; align-items: center; gap: 12px; padding: 20px 24px 14px; }
+.rw-head .petugas-ico { margin: 0; width: 46px; height: 46px; font-size: 1.3rem; flex: none; }
+.rw-head h5 { margin: 0; }
+.rw-live { display: inline-flex; align-items: center; gap: 6px; font-size: .74rem; color: var(--muted); font-weight: 600; }
+.rw-live i { width: 8px; height: 8px; border-radius: 50%; background: #22c55e; display: inline-block; animation: cariDenyut 1s ease-in-out infinite alternate; }
+.rw-x { margin-left: auto; border: 0; background: transparent; color: var(--muted); font-size: 1.3rem; width: 38px; height: 38px; border-radius: 50%; cursor: pointer; }
+.rw-x:hover { background: var(--soft); color: var(--text); }
+.rw-filter { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 24px 12px; }
+.rw-chip { border: 1px solid var(--border); background: transparent; color: var(--muted); border-radius: 50px; padding: 5px 14px; font-size: .78rem; font-weight: 700; cursor: pointer; }
+.rw-chip.on { background: var(--primary); border-color: var(--primary); color: #fff; }
+.rw-warn { margin: 0 24px 10px; padding: 10px 14px; border-radius: 12px; font-size: .8rem; background: rgba(245,158,11,.12); color: #b45309; border: 1px solid rgba(245,158,11,.3); }
+.rw-list { overflow-y: auto; padding: 0 24px 8px; flex: 1; overscroll-behavior: contain; }
+.rw-item { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--border); }
+.rw-ico { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; color: #fff; font-size: 1rem; }
+.rw-ico.proses { background: #6366f1; } .rw-ico.diproses { background: #0ea5e9; } .rw-ico.selesai { background: #10b981; }
+.rw-ico.tolak { background: #ef4444; } .rw-ico.hapus { background: #b91c1c; } .rw-ico.akun { background: #64748b; } .rw-ico.status { background: #f59e0b; }
+.rw-main { min-width: 0; flex: 1; font-size: .88rem; line-height: 1.45; }
+.rw-main code { background: var(--soft); color: var(--text); padding: 1px 7px; border-radius: 6px; font-size: .76rem; }
+.rw-sub { color: var(--muted); font-size: .78rem; }
+.rw-time { color: var(--muted); font-size: .74rem; white-space: nowrap; text-align: right; flex: none; }
+.rw-list { contain: layout paint; transform: translateZ(0); -webkit-overflow-scrolling: touch; }
+.rw-item { content-visibility: auto; contain-intrinsic-size: auto 68px; }
+.rw-ico.notif { background: #f59e0b; }
+a.rw-item { text-decoration: none; color: inherit; }
+a.rw-item:hover { background: var(--row-hover); }
+body.modal-ringan .bg-waves, body.modal-ringan .bg-fade { display: none; }
+body.modal-ringan .bg-waves svg { animation: none; }
+.rw-kosong { text-align: center; color: var(--muted); padding: 40px 0; font-size: .9rem; }
+.rw-foot { padding: 10px 24px 14px; font-size: .74rem; color: var(--muted); border-top: 1px solid var(--border); }
+.ak-box .form-label { font-size: .78rem; font-weight: 700; color: var(--muted); margin-bottom: 4px; }
+.ak-pw { position: relative; }
+.ak-pw .form-control { padding-right: 44px; }
+.ak-eye { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: transparent; color: var(--muted); width: 34px; height: 34px; border-radius: 50%; cursor: pointer; }
+.ak-pesan { font-size: .82rem; font-weight: 600; border-radius: 12px; padding: 9px 12px; margin-bottom: 12px; }
+.ak-pesan.err { background: rgba(239,68,68,.12); color: #dc2626; }
+.ak-pesan.ok { background: rgba(16,185,129,.14); color: #059669; }
+.ak-pesan[hidden] { display: none; }
+@media (max-width: 576px) { .rw-item { flex-wrap: wrap; } .rw-time { width: 100%; text-align: left; padding-left: 48px; } }
+</style>
+
+<!-- RIWAYAT AKTIVITAS -->
+<div class="petugas-overlay" id="dlgRiwayat" hidden>
+    <div class="petugas-box rw-box" role="dialog" aria-label="Riwayat aktivitas">
+        <div class="rw-head">
+            <div class="petugas-ico"><i class="bi bi-clock-history"></i></div>
+            <div>
+                <h5 class="fw-bold">Riwayat Aktivitas</h5>
+                <span class="rw-live"><i></i> Selesai, ditolak &amp; dihapus &middot; diperbarui otomatis</span>
+            </div>
+            <button type="button" class="rw-x" id="rwTutup" aria-label="Tutup"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="rw-filter" id="rwFilter">
+            <button type="button" class="rw-chip on" data-f="all">Semua</button>
+            <button type="button" class="rw-chip" data-f="selesai">Selesai</button>
+            <button type="button" class="rw-chip" data-f="tolak">Ditolak</button>
+            <button type="button" class="rw-chip" data-f="hapus">Dihapus</button>
+        </div>
+        <div class="rw-warn" id="rwWarn" hidden>Pencatatan otomatis proses/tolak/selesai belum aktif karena akun database tidak punya hak TRIGGER. Penghapusan dan penggantian akun tetap tercatat.</div>
+        <div class="rw-list" id="rwList"><div class="rw-kosong">Memuat riwayat...</div></div>
+        <div class="rw-foot" id="rwFoot">&nbsp;</div>
+    </div>
+</div>
+
+<!-- NOTIFIKASI (tampilan sama dengan Riwayat) -->
+<div class="petugas-overlay" id="dlgNotif" hidden>
+    <div class="petugas-box rw-box" role="dialog" aria-label="Notifikasi">
+        <div class="rw-head">
+            <div class="petugas-ico"><i class="bi bi-bell-fill"></i></div>
+            <div>
+                <h5 class="fw-bold">Notifikasi</h5>
+                <span class="rw-live"><i></i> <span id="notifSub">Terbaru &middot; diperbarui otomatis</span></span>
+            </div>
+            <button type="button" class="rw-x" id="ntTutup" aria-label="Tutup"><i class="bi bi-x-lg"></i></button>
+        </div>
+        <div class="rw-list" id="notifList">
+            <div class="rw-kosong" id="notifEmpty">Belum ada notifikasi baru</div>
+        </div>
+        <div class="rw-foot">Pendaftaran baru yang masuk akan tampil di sini secara otomatis</div>
+    </div>
+</div>
+
+<!-- GANTI USERNAME & PASSWORD -->
+<div class="petugas-overlay" id="dlgAkun" hidden>
+    <form class="petugas-box ak-box" id="formAkun" autocomplete="off">
+        <input type="hidden" name="aksi" value="ganti_akun">
+        <input type="hidden" name="csrf" value="<?php echo e($_SESSION['csrf_hapus']); ?>">
+        <div class="petugas-ico"><i class="bi bi-shield-lock-fill"></i></div>
+        <h5 class="fw-bold mb-1">Ganti Username &amp; Password</h5>
+        <p class="soft small mb-3">Kosongkan password baru jika hanya ingin mengganti username.</p>
+        <div class="ak-pesan" id="akPesan" hidden></div>
+        <div class="mb-3">
+            <label class="form-label" for="akUser">Username</label>
+            <input type="text" class="form-control" id="akUser" name="username_baru" maxlength="30" value="<?php echo e($_SESSION['admin_username'] ?? ''); ?>" autocomplete="off" required>
+        </div>
+        <div class="mb-3">
+            <label class="form-label" for="akLama">Password saat ini</label>
+            <div class="ak-pw"><input type="password" class="form-control" id="akLama" name="password_lama" autocomplete="current-password" required><button type="button" class="ak-eye" tabindex="-1" aria-label="Tampilkan"><i class="bi bi-eye-fill"></i></button></div>
+        </div>
+        <div class="mb-3">
+            <label class="form-label" for="akBaru">Password baru (opsional)</label>
+            <div class="ak-pw"><input type="password" class="form-control" id="akBaru" name="password_baru" minlength="6" autocomplete="new-password"><button type="button" class="ak-eye" tabindex="-1" aria-label="Tampilkan"><i class="bi bi-eye-fill"></i></button></div>
+        </div>
+        <div class="mb-4">
+            <label class="form-label" for="akKonf">Ulangi password baru</label>
+            <div class="ak-pw"><input type="password" class="form-control" id="akKonf" name="password_konfirmasi" autocomplete="new-password"><button type="button" class="ak-eye" tabindex="-1" aria-label="Tampilkan"><i class="bi bi-eye-fill"></i></button></div>
+        </div>
+        <div class="d-flex gap-2 justify-content-end">
+            <button type="button" class="btn btn-light rounded-pill px-4 fw-semibold" id="akBatal">Batal</button>
+            <button type="submit" class="btn text-white rounded-pill px-4 fw-bold" id="akSimpan" style="background: var(--grad);">Simpan</button>
+        </div>
+    </form>
+</div>
+
+<script>
+(function () {
+    const $ = id => document.getElementById(id);
+    const esc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+    /* ---------- Hapus: catat riwayat lalu kirim ---------- */
+    const fh = document.querySelector('#modalHapus form');
+    if (fh) fh.addEventListener('submit', function (ev) {
+        if (fh.dataset.logged === '1') return;
+        ev.preventDefault();
+        const fd = new FormData();
+        fd.append('aksi', 'log_hapus'); fd.append('csrf', fh.querySelector('[name="csrf"]').value);
+        fh.querySelectorAll('input[name="ids[]"]').forEach(i => fd.append('ids[]', i.value));
+        const kirim = fetch('dashboard.php', { method: 'POST', body: fd, credentials: 'same-origin' }).catch(() => {});
+        const batas = new Promise(r => setTimeout(r, 2500));
+        Promise.race([kirim, batas]).then(() => { fh.dataset.logged = '1'; fh.submit(); });
+    });
+
+    /* ---------- Riwayat ---------- */
+    const dlg = $('dlgRiwayat'), list = $('rwList'), badge = $('riwayatBadge'), foot = $('rwFoot');
+    const LABEL = { proses: ['bi-hourglass-split', 'membuka untuk diproses'], diproses: ['bi-arrow-repeat', 'mengubah status ke Diproses'],
+        selesai: ['bi-check2-circle', 'menyelesaikan'], tolak: ['bi-x-circle', 'menolak'], hapus: ['bi-trash3-fill', 'menghapus'],
+        akun: ['bi-person-gear', 'mengganti akun'], status: ['bi-pencil', 'mengubah status'] };
+    const BLN = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
+    let data = [], maxId = 0, filter = 'all', terbuka = false, timer = null, ctl = null;
+    const kunciSeen = 'eicv-riwayat-seen';
+    const baca = () => { try { return parseInt(localStorage.getItem(kunciSeen) || '-1', 10); } catch (e) { return -1; } };
+    const tulis = v => { try { localStorage.setItem(kunciSeen, String(v)); } catch (e) {} };
+    const wkt = s => { const m = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(s || ''); return m ? (+m[3]) + ' ' + BLN[+m[2] - 1] + ' ' + m[1] + ', ' + m[4] + ':' + m[5] : esc(s); };
+    const cocok = r => filter === 'all' || (filter === 'proses' ? (r.aksi === 'proses' || r.aksi === 'diproses') : r.aksi === filter);
+
+    const BATCH = 40; let tampil = BATCH;
+    function itemHtml(r) {
+        const L = LABEL[r.aksi] || LABEL.status;
+        let apa = '';
+        if (r.aksi === 'akun') apa = ' <span class="rw-sub">' + esc(r.detail || '') + '</span>';
+        else apa = ' permohonan <code>' + esc(r.kode_tracking || '-') + '</code>' + (r.klinik ? '<div class="rw-sub">' + esc(r.klinik) + (r.detail && r.aksi === 'hapus' ? ' &middot; ' + esc(r.detail) : '') + '</div>' : '');
+        const akun = '';
+        return '<div class="rw-item"><div class="rw-ico ' + esc(r.aksi) + '"><i class="bi ' + L[0] + '"></i></div>' +
+            '<div class="rw-main"><b>' + esc(r.aktor) + '</b>' + akun + ' ' + L[1] + apa + '</div>' +
+            '<div class="rw-time">' + wkt(r.waktu) + '</div></div>';
+    }
+    let sigDraw = '';
+    function gambar(paksa) {
+        const rows = data.filter(cocok);
+        const sg = filter + '|' + rows.length + '|' + (rows[0] ? rows[0].id : 0) + '|' + tampil;
+        if (!paksa && sg === sigDraw) return;           // tidak ada perubahan: jangan gambar ulang
+        sigDraw = sg;
+        const top = list.scrollTop;
+        if (!rows.length) list.innerHTML = '<div class="rw-kosong">Belum ada aktivitas' + (filter === 'all' ? '' : ' untuk kategori ini') + '.</div>';
+        else list.innerHTML = rows.slice(0, tampil).map(itemHtml).join('');
+        list.scrollTop = top;
+        foot.textContent = data.length + ' catatan terbaru (maks. 300) \u00b7 urut dari yang terbaru';
+    }
+    list.addEventListener('scroll', () => {
+        if (list.scrollTop + list.clientHeight < list.scrollHeight - 240) return;
+        const rows = data.filter(cocok);
+        if (tampil >= rows.length) return;
+        const dari = tampil; tampil = Math.min(rows.length, tampil + BATCH);
+        list.insertAdjacentHTML('beforeend', rows.slice(dari, tampil).map(itemHtml).join(''));
+        sigDraw = filter + '|' + rows.length + '|' + (rows[0] ? rows[0].id : 0) + '|' + tampil;
+    }, { passive: true });
+
+    function tampilBadge(n) { if (n > 0) { badge.textContent = n > 99 ? '99+' : n; badge.hidden = false; } else badge.hidden = true; }
+
+    function muatPenuh() {
+        if (ctl) ctl.abort(); ctl = new AbortController();
+        return fetch('dashboard.php?ajax=riwayat', { credentials: 'same-origin', cache: 'no-store', signal: ctl.signal })
+            .then(r => r.ok ? r.json() : Promise.reject()).then(j => {
+                data = j.rows || []; maxId = j.max || 0; $('rwWarn').hidden = j.trigger !== false;
+                if (terbuka) { tulis(maxId); tampilBadge(0); gambar(); }
+            }).catch(() => {});
+    }
+    function cekRingkas() {
+        if (document.hidden) return;
+        let seen = baca();
+        fetch('dashboard.php?ajax=riwayat&ringkas=1&since=' + (seen < 0 ? 0 : seen), { credentials: 'same-origin', cache: 'no-store' })
+            .then(r => r.ok ? r.json() : Promise.reject()).then(j => {
+                if (seen < 0) { tulis(j.max); seen = j.max; tampilBadge(0); return; }
+                if (j.max !== maxId) { maxId = j.max; if (terbuka) muatPenuh(); }
+                if (!terbuka) tampilBadge(j.baru);
+            }).catch(() => {});
+    }
+    function jadwal() { clearInterval(timer); timer = setInterval(cekRingkas, terbuka ? 2500 : 6000); }
+
+    $('btnRiwayat').addEventListener('click', () => { terbuka = true; dlg.hidden = false; document.body.style.overflow = 'hidden'; document.body.classList.add('modal-ringan'); tampil = BATCH; sigDraw = ''; muatPenuh(); jadwal(); });
+    function tutup() { terbuka = false; dlg.hidden = true; document.body.style.overflow = ''; document.body.classList.remove('modal-ringan'); if (maxId) tulis(maxId); tampilBadge(0); jadwal(); }
+    $('rwTutup').addEventListener('click', tutup);
+    dlg.addEventListener('mousedown', e => { if (e.target === dlg) tutup(); });
+    $('rwFilter').addEventListener('click', e => {
+        const b = e.target.closest('.rw-chip'); if (!b) return;
+        filter = b.dataset.f; tampil = BATCH; list.scrollTop = 0; document.querySelectorAll('#rwFilter .rw-chip').forEach(x => x.classList.toggle('on', x === b)); gambar(true);
+    });
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) { cekRingkas(); if (terbuka) muatPenuh(); } });
+    jadwal(); cekRingkas();
+
+    /* ---------- Ganti username & password ---------- */
+    const da = $('dlgAkun'), fa = $('formAkun'), pesan = $('akPesan');
+    const bukaAkun = () => { pesan.hidden = true; ['akLama', 'akBaru', 'akKonf'].forEach(i => $(i).value = ''); da.hidden = false; setTimeout(() => $('akLama').focus(), 50); };
+    const tutupAkun = () => { da.hidden = true; };
+    $('btnAkun').addEventListener('click', bukaAkun); $('btnAkunM').addEventListener('click', bukaAkun);
+    $('akBatal').addEventListener('click', tutupAkun);
+    da.addEventListener('mousedown', e => { if (e.target === da) tutupAkun(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') { if (!da.hidden) tutupAkun(); if (!dlg.hidden) tutup(); } });
+    fa.querySelectorAll('.ak-eye').forEach(b => b.addEventListener('click', () => {
+        const i = b.parentNode.querySelector('input'); const t = i.type === 'password';
+        i.type = t ? 'text' : 'password'; b.innerHTML = '<i class="bi ' + (t ? 'bi-eye-slash-fill' : 'bi-eye-fill') + '"></i>';
+    }));
+    fa.addEventListener('submit', e => {
+        e.preventDefault();
+        const tampil = (ok, t) => { pesan.className = 'ak-pesan ' + (ok ? 'ok' : 'err'); pesan.textContent = t; pesan.hidden = false; };
+        if ($('akBaru').value !== $('akKonf').value) { tampil(false, 'Konfirmasi password baru tidak sama.'); return; }
+        const btn = $('akSimpan'); btn.disabled = true;
+        fetch('dashboard.php', { method: 'POST', body: new FormData(fa), credentials: 'same-origin' })
+            .then(r => r.json().catch(() => ({ ok: false, pesan: 'Respons server tidak valid.' })))
+            .then(j => {
+                tampil(!!j.ok, j.pesan || '');
+                if (j.ok) { ['akLama', 'akBaru', 'akKonf'].forEach(i => $(i).value = ''); if (j.username) $('akUser').value = j.username; setTimeout(tutupAkun, 1400); }
+            }).catch(() => tampil(false, 'Tidak dapat terhubung ke server.'))
+            .finally(() => { btn.disabled = false; });
+    });
+})();
+</script>
+
 <!-- MODAL NAMA PETUGAS -->
 <div class="petugas-overlay" id="dlgPetugas" hidden>
     <form class="petugas-box" id="formPetugas" autocomplete="off">
@@ -910,11 +1520,12 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
     let KLINIK = <?php echo json_encode($filter_klinik); ?>;
     let LABEL_PERIODE = <?php echo json_encode($periode_aktif); ?>;
 
+    // Sinkronisasi URL tombol export agar sesuai dengan pencarian & filter aktif
     function syncLinks() {
         const kw = liveSearchInput.value.trim();
-        const q = 'search=' + encodeURIComponent(kw) + '&bulan=' + BULAN + '&tahun=' + TAHUN + '&klinik=' + encodeURIComponent(KLINIK);
-        btnPdf.href = 'export_pdf.php?' + q;
-        btnExcel.href = 'export_excel.php?' + q;
+        const q = 'search=' + encodeURIComponent(kw) + '&bulan=' + encodeURIComponent(BULAN) + '&tahun=' + encodeURIComponent(TAHUN) + '&klinik=' + encodeURIComponent(KLINIK);
+        if (btnPdf) btnPdf.href = 'export_pdf.php?' + q;
+        if (btnExcel) btnExcel.href = 'export_excel.php?' + q;
     }
     syncLinks();
 
@@ -987,44 +1598,37 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         renumber();
     }
     
-    // KODE BARU UNTUK SCROLL SAAT KLIK KPI
     kartu.forEach(el => el.addEventListener('click', () => {
         const f = el.dataset.filter;
         filterStatus = (f !== 'semua' && filterStatus === f) ? 'semua' : f;
         terapkanFilter(); updatePilihan();
-        
-        // Auto-scroll pelan ke arah area tabel
         document.getElementById('areaTabelData').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }));
     
     tandaiTelat(); perbaruiKpi(); terapkanFilter();
 
-    // KODE BARU UNTUK MENANGKAP KLIK TOMBOL LIHAT PDF LALU MEMBUKA MODAL
     const modalLihatPDF = new bootstrap.Modal(document.getElementById('modalLihatPDF'));
     const frameLihatPDF = document.getElementById('frameLihatPDF');
 
     document.addEventListener('click', function(e) {
-        // Karena tabel sering di-refresh AJAX, kita gunakan event delegation
         const btnLihat = e.target.closest('.btn-lihat-pdf');
         if (btnLihat) {
             e.preventDefault();
             const pdfUrl = btnLihat.getAttribute('data-pdf-url');
-            // navpanes=0: panel miniatur halaman tidak dirender (lebih ringan); view=FitH: lebar halaman pas
             const urlPdf = pdfUrl + (pdfUrl.indexOf('#') < 0 ? '#navpanes=0&view=FitH' : '');
             document.getElementById('pdfMemuat').hidden = false;
-            document.body.classList.add('pdf-aktif');          // jeda animasi latar & polling selama pratinjau terbuka
+            document.body.classList.add('pdf-aktif');          
             frameLihatPDF.src = urlPdf;
             modalLihatPDF.show();
         }
     });
 
-    // Kosongkan iframe ketika modal ditutup agar browser tidak memuat file secara background
     frameLihatPDF.addEventListener('load', function () { document.getElementById('pdfMemuat').hidden = true; });
     document.getElementById('modalLihatPDF').addEventListener('hidden.bs.modal', function () {
         frameLihatPDF.src = '';
         document.getElementById('pdfMemuat').hidden = true;
         document.body.classList.remove('pdf-aktif');
-        clearTimeout(pollT); tick();                            // lanjutkan pembaruan data otomatis
+        clearTimeout(pollT); tick();                            
     });
 
     function syncRows(html) {
@@ -1054,7 +1658,6 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
                 cur = document.importNode(fr, true); cur.__sig = sigOf(fr); cur.classList.add('row-baru'); baru++;
                 { const nm = fr.querySelector('.fw-bold.ink'); if (nm) namaBaru.push(nm.textContent.trim()); }
                 
-                // Tambahkan lencana penanda "Baru" di sebelah label status
                 const tdStatus = cur.querySelector('td:nth-child(8)');
                 if (tdStatus) {
                     const b = document.createElement('span');
@@ -1104,27 +1707,33 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         if (notifEmpty) notifEmpty.style.display = 'none';
         const div = document.createElement('a');
         div.href = "#areaTabelData"; 
-        div.className = "notif-item";
+        div.className = "rw-item";
+        const sk = new Date(), jam = String(sk.getHours()).padStart(2, '0') + ':' + String(sk.getMinutes()).padStart(2, '0');
         div.innerHTML = `
-            <div class="notif-icon"><i class="bi bi-bell-fill"></i></div>
-            <div>
-                <div class="notif-text">${text}</div>
-                <div class="notif-time">Baru saja</div>
-            </div>
+            <div class="rw-ico notif"><i class="bi bi-bell-fill"></i></div>
+            <div class="rw-main">${text}</div>
+            <div class="rw-time">${sk.getDate()} ${['Jan','Feb','Mar','Apr','Mei','Jun','Jul','Agu','Sep','Okt','Nov','Des'][sk.getMonth()]} ${sk.getFullYear()}, ${jam}</div>
         `;
         notifList.insertBefore(div, notifList.firstChild);
-        if (notifList.children.length > 20) notifList.lastChild.remove();
+        if (notifList.children.length > 21) notifList.lastChild.remove();
         
         unreadNotif++;
         notifCountBadge.textContent = unreadNotif;
         notifCountBadge.hidden = false;
     }
 
+    const dlgNotif = document.getElementById('dlgNotif');
+    function tutupNotif() { dlgNotif.hidden = true; document.body.classList.remove('modal-ringan'); document.body.style.overflow = ''; }
     document.getElementById('notifToggle').addEventListener('click', () => {
         unreadNotif = 0;
         notifCountBadge.hidden = true;
         resetBadge();
+        dlgNotif.hidden = false; document.body.classList.add('modal-ringan'); document.body.style.overflow = 'hidden';
     });
+    document.getElementById('ntTutup').addEventListener('click', tutupNotif);
+    dlgNotif.addEventListener('mousedown', e => { if (e.target === dlgNotif) tutupNotif(); });
+    notifList.addEventListener('click', e => { if (e.target.closest('a.rw-item')) tutupNotif(); });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && !dlgNotif.hidden) tutupNotif(); });
 
     function notifBaru(n, daftar) {
         belumDilihat += n; setBadge();
@@ -1143,7 +1752,7 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         return fetch('dashboard.php?ajax=1&' + qsBase(), { credentials: 'same-origin', cache: 'no-store' })
             .then(r => r.text()).then(html => {
                 const res = syncRows(html);
-                if (liveSearchInput.value.trim()) saringLokal(liveSearchInput.value.trim());   // pertahankan sorotan setelah pembaruan
+                if (liveSearchInput.value.trim()) saringLokal(liveSearchInput.value.trim());   
                 if (!silent) {
                     if (res.baru) notifBaru(res.baru, res.namaBaru);
                     if (res.baru) toast('<i class="bi bi-bell-fill"></i> <span>' + res.baru + ' permohonan baru masuk' +
@@ -1174,6 +1783,47 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
     addEventListener('focus', resetBadge);
     tick();
 
+    // ===== Ganti bulan tanpa memuat ulang halaman (posisi gulir tetap) =====
+    function pindahBulan(bln, thn) {
+        if (String(BULAN) === bln && String(TAHUN) === thn) return;
+        const area = document.getElementById('areaTabelData'), y = window.scrollY;
+        if (searchCtl) searchCtl.abort();
+        BULAN = bln; TAHUN = thn;
+        LABEL_PERIODE = (NAMA_BULAN[bln] || bln) + ' ' + thn;
+        document.querySelectorAll('#bulanStrip a[data-bulan]').forEach(a => a.classList.toggle('active', a.dataset.bulan === bln && a.dataset.tahun === thn));
+        try { history.replaceState(null, '', 'dashboard.php?bulan=' + bln + '&tahun=' + thn + '&klinik=' + encodeURIComponent(KLINIK)); } catch (e) {}
+        document.querySelectorAll('form input[name="bulan"][type="hidden"]').forEach(i => { i.value = bln; });
+        document.querySelectorAll('form input[name="tahun"][type="hidden"]').forEach(i => { i.value = thn; });
+        syncLinks();
+        setTxt('labelTabel', liveSearchInput.value.trim() ? 'Hasil pencarian \u00b7 semua periode' : LABEL_PERIODE);
+        area.style.minHeight = area.offsetHeight + 'px';          // cegah halaman menyusut & melompat
+        cariBox.classList.add('memuat');
+        fetch('dashboard.php?ajax=1&' + qsBase(), { credentials: 'same-origin', cache: 'no-store' })
+            .then(r => r.text()).then(html => {
+                if (String(BULAN) !== bln || String(TAHUN) !== thn) return;   // sudah pindah lagi
+                tableBody.innerHTML = '';
+                syncRows(html);
+                tableBody.querySelectorAll('.marker-baru').forEach(n => n.remove());
+                tableBody.querySelectorAll('.row-baru').forEach(n => n.classList.remove('row-baru'));
+                if (liveSearchInput.value.trim()) saringLokal(liveSearchInput.value.trim());
+                const cek = document.getElementById('cekSemua'); if (cek) cek.checked = false;
+                updatePilihan();
+            })
+            .catch(() => {})
+            .then(() => {
+                cariBox.classList.remove('memuat');
+                requestAnimationFrame(() => { area.style.minHeight = ''; window.scrollTo({ top: y, left: 0, behavior: 'instant' }); });
+            });
+        lastSig = null; clearTimeout(pollT); tick();                // perbarui grafik & ringkasan
+    }
+    document.getElementById('bulanStrip').addEventListener('click', e => {
+        const a = e.target.closest('a[data-bulan]');
+        if (!a || e.ctrlKey || e.metaKey || e.shiftKey || e.altKey || e.button === 1) return;
+        e.preventDefault();
+        pindahBulan(a.dataset.bulan, a.dataset.tahun);
+        a.blur();
+    });
+
     let searchT;
     const btnBersih = document.getElementById('btnBersih'), cariBox = document.querySelector('.search-wrapper');
     const kataKunci = kw => kw.toLowerCase().split(/\s+/).filter(Boolean);
@@ -1189,7 +1839,6 @@ body.pdf-aktif .navbar-brand > div { animation: none; }
         renumber(); updatePilihan();
         sorot(kw);
     }
-    /* Sorot huruf/kata yang cocok pada kolom tanggal, kode tracking, dan klinik/pemohon */
     function sorot(kw) {
         const kata = kataKunci(kw).sort((a, b) => b.length - a.length).map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
         rowsOf(tableBody).forEach(r => {

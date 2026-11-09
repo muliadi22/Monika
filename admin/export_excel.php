@@ -44,12 +44,12 @@ if (!empty($filter_klinik)) {
     $nama_file .= "_" . preg_replace('/[^A-Za-z0-9]/', '', $_GET['klinik']);
 }
 
-// Tambahkan ekstensi file
 $nama_file .= ".xls";
 
-// Memaksa browser mendownload file Excel dengan nama dinamis
-header("Content-type: application/vnd-ms-excel");
-header("Content-Disposition: attachment; filename={$nama_file}");
+// HEADER UNTUK EXPORT EXCEL YANG AMAN & STABIL DI SEMUA PERANGKAT
+header("Content-Type: application/vnd.ms-excel; charset=utf-8");
+header("Content-Disposition: attachment; filename=\"{$nama_file}\"");
+header("Cache-Control: max-age=0");
 header("Pragma: no-cache");
 header("Expires: 0");
 
@@ -71,113 +71,165 @@ if(!empty($filter_klinik)) {
 $query .= " ORDER BY tanggal_permohonan DESC, id_permohonan DESC";
 $result = mysqli_query($conn, $query);
 
-// Helper format tanggal
 function fmtDate($date) {
     if(empty($date) || $date == '0000-00-00') return '-';
     return date('d-m-Y', strtotime($date));
 }
+
+// DEFINISI WARNA KATEGORI KOLOM
+$bg_umum   = '#f2f2f2'; // Abu-abu
+$bg_klinik = '#d9e1f2'; // Biru Pastel
+$bg_eicv   = '#e2efda'; // Hijau Pastel
+$bg_faktur = '#fff2cc'; // Kuning Pastel
+$bg_admin  = '#fce4d6'; // Oranye Pastel
 ?>
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+    <meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+    <!--[if gte mso 9]>
+    <xml>
+        <x:ExcelWorkbook>
+            <x:ExcelWorksheets>
+                <x:ExcelWorksheet>
+                    <x:Name>Rekap Data</x:Name>
+                    <x:WorksheetOptions>
+                        <x:DisplayGridlines/>
+                    </x:WorksheetOptions>
+                </x:ExcelWorksheet>
+            </x:ExcelWorksheets>
+        </x:ExcelWorkbook>
+    </xml>
+    <![endif]-->
+    <style>
+        .title { font-size: 16px; font-weight: bold; text-align: center; color: #000000; font-family: Calibri, sans-serif; }
+        .subtitle { font-size: 12px; text-align: center; margin-bottom: 20px; color: #000000; font-family: Calibri, sans-serif; }
+        table { border-collapse: collapse; font-family: Calibri, sans-serif; font-size: 11pt; }
+        th, td { border: 0.5pt solid #000000; padding: 5px; vertical-align: middle; white-space: nowrap; }
+        .text-center { text-align: center; }
+        .text-left { text-align: left; }
+    </style>
+</head>
+<body>
 
-<center>
-    <h2>LAPORAN REKAPITULASI PERMOHONAN DAN PEMBERIAN EICV</h2>
-    <p><b><?php echo $teks_subtitle; ?></b></p>
-</center>
+<table border="0" cellpadding="0" cellspacing="0" width="100%">
+    <tr>
+        <td colspan="26" class="title">LAPORAN REKAPITULASI PERMOHONAN DAN PEMBERIAN EICV</td>
+    </tr>
+    <tr>
+        <td colspan="26" class="subtitle"><b><?php echo htmlspecialchars($teks_subtitle); ?></b></td>
+    </tr>
+</table>
 
-<table border="1" cellpadding="5" cellspacing="0" width="100%">
+<table border="1" cellspacing="0" cellpadding="4">
     <thead>
         <!-- Baris Header Utama (Kategori) -->
-        <tr style="background-color: #2c3e50; color: #ffffff; text-align: center; font-weight: bold; font-size: 14px;">
-            <th rowspan="2" style="vertical-align: middle;">No</th>
-            <th rowspan="2" style="vertical-align: middle;">Kode Tracking</th>
-            <th colspan="6" style="background-color: #34495e;">1. DATA PEMOHON & KLINIK</th>
-            <th colspan="3" style="background-color: #16a085;">2. DATA EICV & PERMINTAAN</th>
-            <th colspan="10" style="background-color: #2980b9;">3. DATA FAKTUR & VAKSIN</th>
-            <th colspan="5" style="background-color: #d35400;">4. KEPUTUSAN ADMIN</th>
+        <tr style="color: #000000; text-align: center; font-weight: bold; font-size: 11pt;">
+            <th rowspan="2" style="background-color: <?php echo $bg_umum; ?>;">No</th>
+            <th rowspan="2" style="background-color: <?php echo $bg_umum; ?>;">Kode Tracking</th>
+            <th colspan="6" style="background-color: <?php echo $bg_klinik; ?>;">1. DATA PEMOHON & KLINIK</th>
+            <th colspan="3" style="background-color: <?php echo $bg_eicv; ?>;">2. DATA EICV & PERMINTAAN</th>
+            <th colspan="10" style="background-color: <?php echo $bg_faktur; ?>;">3. DATA FAKTUR & VAKSIN</th>
+            <th colspan="5" style="background-color: <?php echo $bg_admin; ?>;">4. KEPUTUSAN ADMIN</th>
         </tr>
         
         <!-- Baris Header Sub (Nama Kolom) -->
-        <tr style="background-color: #ecf0f1; color: #000000; text-align: center; font-weight: bold; font-size: 12px;">
+        <tr style="color: #000000; text-align: center; font-weight: bold; font-size: 11pt;">
             <!-- Group 1 -->
-            <th>Tgl Permohonan</th>
-            <th>Nama Pemohon</th>
-            <th>Nama Klinik</th>
-            <th>Kabupaten / Kota</th>
-            <th>No Izin Penerbitan</th>
-            <th>Masa Berlaku Izin</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">Tgl Permohonan</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">Nama Pemohon</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">Nama Klinik</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">Kabupaten / Kota</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">No Izin Penerbitan</th>
+            <th style="background-color: <?php echo $bg_klinik; ?>;">Masa Berlaku Izin</th>
             <!-- Group 2 -->
-            <th>Stock Akhir EICV</th>
-            <th>Pemakaian EICV</th>
-            <th>Jml Permintaan</th>
+            <th style="background-color: <?php echo $bg_eicv; ?>;">Stock Akhir EICV</th>
+            <th style="background-color: <?php echo $bg_eicv; ?>;">Pemakaian EICV</th>
+            <th style="background-color: <?php echo $bg_eicv; ?>;">Jml Permintaan</th>
             <!-- Group 3 -->
-            <th>Tgl Faktur</th>
-            <th>Nama Distributor</th>
-            <th>No Faktur</th>
-            <th>Jml Pembelian</th>
-            <th>Merek Vaksin</th>
-            <th>Batch Vaksin</th>
-            <th>Exp Date Vaksin</th>
-            <th>Jenis Vaksin</th>
-            <th>Jml Vaksin MM</th>
-            <th>Jml Vaksin Polio</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Tgl Faktur</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Nama Distributor</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">No Faktur</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Jml Pembelian</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Merek Vaksin</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Batch Vaksin</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Exp Date Vaksin</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Jenis Vaksin</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Jml Vaksin MM</th>
+            <th style="background-color: <?php echo $bg_faktur; ?>;">Jml Vaksin Polio</th>
             <!-- Group 4 -->
-            <th>Status Permohonan</th>
-            <th>Nama PIC Proses</th>
-            <th>Tgl Diproses</th>
-            <th>Kuota Diberikan</th>
-            <th>Sisa Kuota Faktur</th>
+            <th style="background-color: <?php echo $bg_admin; ?>;">Status Permohonan</th>
+            <th style="background-color: <?php echo $bg_admin; ?>;">Nama PIC Proses</th>
+            <th style="background-color: <?php echo $bg_admin; ?>;">Tgl Diproses</th>
+            <th style="background-color: <?php echo $bg_admin; ?>;">Kuota Diberikan</th>
+            <th style="background-color: <?php echo $bg_admin; ?>;">Sisa Kuota Faktur</th>
         </tr>
     </thead>
     <tbody>
         <?php 
         $no = 1;
-        if(mysqli_num_rows($result) > 0) {
+        if($result && mysqli_num_rows($result) > 0) {
             while($row = mysqli_fetch_assoc($result)) { 
+                
+                // --- Logika Pewarnaan Spesial Kolom Status ---
+                $st = $row['status_permohonan'];
+                $bg_st = '#ffffff'; $color_st = '#000000';
+                if ($st == 'Menunggu') { 
+                    $bg_st = '#fef3c7'; $color_st = '#92400e'; 
+                } elseif ($st == 'Diproses') { 
+                    $bg_st = '#e0f2fe'; $color_st = '#0369a1'; 
+                } elseif ($st == 'Selesai') { 
+                    $bg_st = '#d1fae5'; $color_st = '#065f46'; 
+                } elseif ($st == 'Ditolak') { 
+                    $bg_st = '#fee2e2'; $color_st = '#991b1b'; 
+                }
         ?>
-        <!-- vertical-align: middle memastikan data sejajar lurus di tengah baris -->
-        <tr style="vertical-align: middle;">
-            <td align="center"><?php echo $no++; ?></td>
-            <td align="center"><b><?php echo $row['kode_tracking']; ?></b></td>
+        <tr>
+            <!-- UMUM -->
+            <td class="text-center" style="background-color: <?php echo $bg_umum; ?>; mso-number-format:'\@';"><?php echo $no++; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_umum; ?>; mso-number-format:'\@';"><b><?php echo htmlspecialchars($row['kode_tracking']); ?></b></td>
             
-            <!-- Group 1: Pemohon -->
-            <td align="center"><?php echo fmtDate($row['tanggal_permohonan']); ?></td>
-            <td align="left"><?php echo htmlspecialchars($row['nama_pemohon']); ?></td>
-            <td align="left"><?php echo htmlspecialchars($row['nama_klinik']); ?></td>
-            <td align="left"><?php echo !empty($row['nama_kabupaten']) ? htmlspecialchars($row['nama_kabupaten']) : '-'; ?></td>
-            <td align="center" style="mso-number-format:'\@';"><?php echo htmlspecialchars($row['no_izin_penerbitan']); ?></td>
-            <td align="center"><?php echo fmtDate($row['masa_berlaku_izin']); ?></td>
+            <!-- KLINIK -->
+            <td class="text-center" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo fmtDate($row['tanggal_permohonan']); ?></td>
+            <td class="text-left" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['nama_pemohon']); ?></td>
+            <td class="text-left" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['nama_klinik']); ?></td>
+            <td class="text-left" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo !empty($row['nama_kabupaten']) ? htmlspecialchars($row['nama_kabupaten']) : '-'; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['no_izin_penerbitan']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_klinik; ?>; mso-number-format:'\@';"><?php echo fmtDate($row['masa_berlaku_izin']); ?></td>
             
-            <!-- Group 2: EICV -->
-            <td align="center"><?php echo $row['jumlah_stock_akhir_eicv']; ?></td>
-            <td align="center"><?php echo $row['jumlah_pemakaian_eicv']; ?></td>
-            <td align="center" style="font-weight: bold; color: #16a085;"><?php echo $row['jumlah_permintaan']; ?></td>
+            <!-- EICV -->
+            <td class="text-center" style="background-color: <?php echo $bg_eicv; ?>; mso-number-format:'0';"><?php echo (int)$row['jumlah_stock_akhir_eicv']; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_eicv; ?>; mso-number-format:'0';"><?php echo (int)$row['jumlah_pemakaian_eicv']; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_eicv; ?>; font-weight: bold; mso-number-format:'0'; color: #000000;"><?php echo (int)$row['jumlah_permintaan']; ?></td>
             
-            <!-- Group 3: Faktur & Vaksin -->
-            <td align="center"><?php echo fmtDate($row['tanggal_faktur']); ?></td>
-            <!-- Nama Distributor dibikin Rata Kiri -->
-            <td align="left"><?php echo htmlspecialchars($row['nama_distributor']); ?></td>
-            <td align="center" style="mso-number-format:'\@';"><?php echo htmlspecialchars($row['no_invoice']); ?></td>
-            <td align="center"><?php echo $row['jumlah_pembelian']; ?></td>
-            <td align="center"><?php echo htmlspecialchars($row['merek_vaksin']); ?></td>
-            <td align="center" style="mso-number-format:'\@';"><?php echo htmlspecialchars($row['batch_vaksin']); ?></td>
-            <td align="center"><?php echo fmtDate($row['exp_date']); ?></td>
-            <td align="center"><?php echo htmlspecialchars($row['jenis_vaksin']); ?></td>
-            <td align="center"><?php echo $row['jumlah_vaksin_mm'] ?? '0'; ?></td>
-            <td align="center"><?php echo $row['jumlah_vaksin_polio'] ?? '0'; ?></td>
+            <!-- FAKTUR -->
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo fmtDate($row['tanggal_faktur']); ?></td>
+            <td class="text-left" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['nama_distributor']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['no_invoice']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'0';"><?php echo (int)$row['jumlah_pembelian']; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['merek_vaksin']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['batch_vaksin']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo fmtDate($row['exp_date']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'\@';"><?php echo htmlspecialchars($row['jenis_vaksin']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'0';"><?php echo (int)($row['jumlah_vaksin_mm'] ?? 0); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_faktur; ?>; mso-number-format:'0';"><?php echo (int)($row['jumlah_vaksin_polio'] ?? 0); ?></td>
             
-            <!-- Group 4: Admin -->
-            <td align="center"><b><?php echo $row['status_permohonan']; ?></b></td>
-            <td align="left"><?php echo !empty($row['nama_pic']) ? htmlspecialchars($row['nama_pic']) : '-'; ?></td>
-            <td align="center"><?php echo fmtDate($row['tanggal_proses']); ?></td>
-            <td align="center" style="font-weight: bold; color: #d35400;"><?php echo !empty($row['kuota_disetujui']) ? $row['kuota_disetujui'] : '0'; ?></td>
-            <td align="center"><?php echo !empty($row['sisa_kuota_faktur']) ? $row['sisa_kuota_faktur'] : '0'; ?></td>
+            <!-- ADMIN -->
+            <td class="text-center" style="background-color: <?php echo $bg_st; ?>; color: <?php echo $color_st; ?>; mso-number-format:'\@';"><b><?php echo htmlspecialchars($row['status_permohonan']); ?></b></td>
+            <td class="text-left" style="background-color: <?php echo $bg_admin; ?>; mso-number-format:'\@';"><?php echo !empty($row['nama_pic']) ? htmlspecialchars($row['nama_pic']) : '-'; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_admin; ?>; mso-number-format:'\@';"><?php echo fmtDate($row['tanggal_proses']); ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_admin; ?>; font-weight: bold; mso-number-format:'0'; color: #000000;"><?php echo !empty($row['kuota_disetujui']) ? (int)$row['kuota_disetujui'] : 0; ?></td>
+            <td class="text-center" style="background-color: <?php echo $bg_admin; ?>; mso-number-format:'0';"><?php echo !empty($row['sisa_kuota_faktur']) ? (int)$row['sisa_kuota_faktur'] : 0; ?></td>
         </tr>
         <?php 
             }
         } else {
         ?>
         <tr>
-            <td colspan="26" align="center" style="padding: 20px; font-style: italic;">Tidak ada data permohonan yang ditemukan untuk filter ini.</td>
+            <td colspan="26" class="text-center" style="padding: 20px; font-style: italic; background-color: #ffffff;">Tidak ada data permohonan yang ditemukan untuk filter ini.</td>
         </tr>
         <?php } ?>
     </tbody>
 </table>
+
+</body>
+</html>
